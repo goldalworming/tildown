@@ -175,7 +175,14 @@ enum Btn {
     Field(u8),
     SyncConnect,
     SyncNow,
+    /// Buat token acak (disalin ke clipboard) / buka halaman deploy server.
+    GenToken,
+    Deploy,
 }
+
+/// Tombol "Deploy to Cloudflare" untuk `server/`.
+const DEPLOY_URL: &str =
+    "https://deploy.workers.cloudflare.com/?url=https://github.com/goldalworming/tildown/tree/main/server";
 
 /// Pilihan lebar kolom (Narrow / Normal / Wide).
 const WIDTHS: [f32; 3] = [600.0, 720.0, 880.0];
@@ -1596,6 +1603,8 @@ pub struct App {
     /// Isian tab Sync [URL, token] dan yang sedang diketik.
     sync_in: [Doc; 2],
     sync_edit: Option<usize>,
+    /// Petunjuk sesudah Generate (menggantikan status sementara).
+    sync_msg: Option<&'static str>,
     focused: bool,
 }
 
@@ -1718,6 +1727,7 @@ impl App {
             sync_last: None,
             sync_in: [Doc::new(&sync.url), Doc::new(&sync.token)],
             sync_edit: None,
+            sync_msg: None,
             focused: true,
             sync,
         };
@@ -1966,6 +1976,7 @@ impl App {
 
     /// Tombol Connect / Disconnect.
     fn sync_connect(&mut self) {
+        self.sync_msg = None;
         if self.sync.on() {
             self.sync = Sync::default();
             self.sync_due = None;
@@ -1988,6 +1999,9 @@ impl App {
         let t = self.theme;
         if self.sync_busy {
             return ("Syncing…".into(), t.dim);
+        }
+        if let Some(m) = self.sync_msg {
+            return (m.into(), t.accent);
         }
         match (&self.sync_last, self.sync.on()) {
             (Some(Err(e)), _) => (format!("Sync failed: {e}"), t.err),
@@ -2166,10 +2180,17 @@ impl App {
             y += sec;
             row(&mut v, y + 28.0 * s, 2, &|i| Btn::OpenIn(i as u8));
         } else if self.settings == Some(2) {
-            // Teks pembuka 2 baris, lalu dua isian (judul 20 + 8 + 36), lalu tombol.
+            // Teks pembuka 2 baris, lalu dua isian (judul 20 + 8 + 36) — token
+            // dulu, lalu URL — masing-masing dengan tombol di kanan, lalu tombol.
             let fy = |k: f32| (y + (64.0 + 28.0) * s + k * 88.0 * s).round();
-            for k in 0..2u8 {
-                v.push((Rect::new(bx, fy(k as f32), bw, (36.0 * s).round()), Btn::Field(k)));
+            let on = self.sync.on();
+            let aw = if on { 0.0 } else { (112.0 * s).round() };
+            let fh = (36.0 * s).round();
+            for (k, (f, a)) in [(1u8, Btn::GenToken), (0, Btn::Deploy)].into_iter().enumerate() {
+                v.push((Rect::new(bx, fy(k as f32), bw - aw, fh), Btn::Field(f)));
+                if !on {
+                    v.push((Rect::new(bx + bw - aw + 8.0 * s, fy(k as f32), aw - 8.0 * s, fh), a));
+                }
             }
             let by = y + (64.0 + 2.0 * 88.0 + 8.0) * s;
             if self.sync.on() {
@@ -2261,6 +2282,13 @@ impl App {
                 self.sync_edit = Some(i as usize);
             }
             Btn::SyncConnect => self.sync_connect(),
+            Btn::GenToken => {
+                let tok = sync::new_token();
+                clip_set(&tok);
+                self.sync_in[1] = Doc::new(&tok);
+                self.sync_msg = Some("Token copied. Paste it when Cloudflare asks for TOKEN.");
+            }
+            Btn::Deploy => open_url(DEPLOY_URL),
             Btn::SyncNow => self.sync_due = Some(Instant::now()),
             Btn::MatchPrev => self.goto_match(-1),
             Btn::MatchNext => self.goto_match(1),
@@ -2343,7 +2371,7 @@ impl App {
 
     fn open_settings(&mut self, tab: u8) {
         self.settings = Some(tab);
-        self.sync_edit = (tab == 2 && !self.sync.on()).then_some(0);
+        self.sync_edit = (tab == 2 && !self.sync.on()).then_some(1);
         self.trash = self.store.trashed();
     }
 
@@ -3538,8 +3566,8 @@ impl App {
             p.text(bx, b, Face::Regular, px, v, t.dim, bw);
         } else if self.settings == Some(2) {
             for (k, l) in [
-                "Sync notes through your own Cloudflare Worker (free plan).",
-                "See “Sync” in the TilDown README to deploy it in a few clicks.",
+                "Sync through your own Cloudflare Worker (free plan): generate a",
+                "token, deploy the server with it, then paste the Worker URL here.",
             ]
             .iter()
             .enumerate()
@@ -3547,7 +3575,7 @@ impl App {
                 let b = p.base(Face::Regular, px, y0 + k as f32 * 22.0 * s, 20.0 * s);
                 p.text(bx, b, Face::Regular, px, l, t.dim, bw);
             }
-            for (k, l) in ["Server URL", "Token"].iter().enumerate() {
+            for (k, l) in ["Token", "Server URL"].iter().enumerate() {
                 let b = p.base(Face::Semi, px, y0 + (64.0 + k as f32 * 88.0) * s, 20.0 * s);
                 p.text(bx, b, Face::Semi, px, l, t.fg, bw);
             }
@@ -3621,7 +3649,7 @@ impl App {
                     let (tx, tw) = (r.x + 12.0 * s, r.w - 24.0 * s);
                     let bl = p.base(Face::Regular, px, r.y, r.h);
                     if d.text.is_empty() {
-                        let hint = ["https://tildown-sync.<you>.workers.dev", "The TOKEN you set when deploying"];
+                        let hint = ["https://tildown-sync.<you>.workers.dev", "Press Generate, or paste your TOKEN"];
                         p.text(tx, bl, Face::Regular, px, hint[i as usize], t.dim, tw);
                     } else {
                         p.text(tx, bl, Face::Regular, px, &show(&d.text), t.fg, tw);
@@ -3631,6 +3659,11 @@ impl App {
                         let cw = (1.5 * s).round().max(1.0);
                         p.rect(Rect::new(cx.min(tx + tw).round(), r.y + 9.0 * s, cw, r.h - 18.0 * s), t.fg);
                     }
+                }
+                Btn::GenToken | Btn::Deploy => {
+                    self.hover_bg(p, r, b);
+                    p.rframe(r, 6.0 * s, lw, if hot { t.dim } else { t.border });
+                    p.center(r, Face::Medium, px, if b == Btn::Deploy { "Deploy ↗" } else { "Generate" }, t.fg);
                 }
                 Btn::SyncConnect | Btn::SyncNow => {
                     let label = match b {

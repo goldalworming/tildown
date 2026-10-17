@@ -51,6 +51,13 @@ pub fn hash(t: &str) -> u64 {
     h.max(1)
 }
 
+/// Token acak 256 bit (hex) untuk server sync.
+pub fn new_token() -> String {
+    let mut b = [0u8; 32];
+    getrandom::getrandom(&mut b).expect("RNG sistem");
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
 /// Id dari server dipakai sebagai nama berkas: tolak yang bisa keluar folder.
 pub fn valid_id(id: &str) -> bool {
     !id.is_empty()
@@ -384,6 +391,13 @@ mod tests {
         assert_eq!((y2.cursor, y2.base.len()), (yb.cursor, yb.base.len()));
         let _ = std::fs::remove_dir_all(&a.dir);
         let _ = std::fs::remove_dir_all(&b.dir);
+    }
+
+    #[test]
+    fn tokens() {
+        let (a, b) = (new_token(), new_token());
+        assert_eq!(a.len(), 64);
+        assert_ne!(a, b);
     }
 
     #[test]

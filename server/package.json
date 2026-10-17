@@ -13,7 +13,7 @@
   "cloudflare": {
     "bindings": {
       "TOKEN": {
-        "description": "Secret token for the TilDown app. Use a long random string (min. 32 characters), e.g. from `openssl rand -hex 32`. Enter the same token in TilDown → Settings → Sync."
+        "description": "Secret token for the TilDown app. In TilDown → Settings → Sync, press **Generate** (it copies a new token to the clipboard) and paste it here."
       },
       "NOTES": {
         "description": "Durable Object (SQLite) that stores your notes."

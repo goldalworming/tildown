@@ -30,14 +30,12 @@ Built from scratch in Rust on **wgpu + winit**. One codebase runs on desktop and
 
 TilDown syncs through a small server that you deploy to **your own** Cloudflare account. It is a Worker plus a SQLite Durable Object, and the free Workers plan is enough. Your notes stay in your account.
 
-1. Click the button below. Sign in to Cloudflare, and when you are asked for `TOKEN`, enter a long random string, for example the output of `openssl rand -hex 32`. Keep it somewhere safe.
+1. In TilDown, open **Settings → Sync** and press **Generate**. A new random token is filled in and copied to the clipboard.
+2. Press **Deploy ↗**, which opens the button below. Sign in to Cloudflare and paste the token when you are asked for `TOKEN`. When the deploy finishes, copy the Worker URL (for example `https://tildown-sync.<you>.workers.dev`) into **Server URL**.
 
    [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/goldalworming/tildown/tree/main/server)
 
-2. In TilDown, open **Settings → Sync** and enter:
-   - the Worker URL, for example `https://tildown-sync.<you>.workers.dev`
-   - the same token
-3. Press **Connect**. Do the same on your other devices.
+3. Press **Connect**. On your other devices, enter the same URL and token, then press **Connect**.
 
 How syncing works:
 - TilDown sends changes a few seconds after you save, checks for new changes every minute while the window is active, and syncs when you switch away.
