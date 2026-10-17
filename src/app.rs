@@ -61,6 +61,9 @@ pub enum Ev {
     /// Gambar yang ditempel atau di-drop (web): nama, isi.
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     Img(String, Vec<u8>),
+    /// Gambar selesai di-decode di thread latar (desktop).
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    Decoded(String, Option<Img>),
     /// Isi gambar `assets/…` selesai dibaca (web, lazy).
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     Asset(String),
@@ -615,7 +618,7 @@ impl RdView {
     }
 }
 
-struct Img {
+pub(crate) struct Img {
     w: u32,
     h: u32,
     rgba: Vec<u8>,
@@ -719,6 +722,26 @@ fn disk_asset(dir: &Path, src: &str) -> Option<Vec<u8>> {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn disk_asset(_: &Path, _: &str) -> Option<Vec<u8>> {
+    None
+}
+
+/// Penerima hasil decode di thread latar (desktop); belum dipasang = sinkron.
+static DECODED: std::sync::OnceLock<Box<dyn Fn(String, Option<Img>) + Send + std::marker::Sync>> =
+    std::sync::OnceLock::new();
+
+/// Decode tanpa menahan UI: `None` dulu, gambar menyusul lewat `DECODED`
+/// (`Ev::Decoded`). Web tidak punya thread: sinkron (isinya sendiri lazy).
+fn decode_bg(dir: &Path, src: &str) -> Option<Img> {
+    if cfg!(target_arch = "wasm32") || DECODED.get().is_none() {
+        return decode_img(dir, src);
+    }
+    let (dir, src) = (dir.to_owned(), src.to_owned());
+    std::thread::spawn(move || {
+        let img = decode_img(&dir, &src);
+        if let Some(f) = DECODED.get() {
+            f(src, img);
+        }
+    });
     None
 }
 
@@ -902,7 +925,7 @@ fn build_read(
             BKind::Image { src } => {
                 let size = imgs
                     .entry(src.clone())
-                    .or_insert_with(|| decode_img(dir, src))
+                    .or_insert_with(|| decode_bg(dir, src))
                     .as_ref()
                     .map(|i| (i.w as f32, i.h as f32));
                 match size {
@@ -1771,6 +1794,11 @@ pub fn run() -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     let mut app = App::new(store, fonts);
     app.proxy = Some(el.create_proxy());
+    // Mode screenshot butuh gambar di frame pertama: tetap sinkron.
+    if std::env::var_os("MARKDOWN_SHOT").is_none() {
+        let p = el.create_proxy();
+        _ = DECODED.set(Box::new(move |src, img| _ = p.send_event(Ev::Decoded(src, img))));
+    }
     el.set_control_flow(ControlFlow::Wait); // tidur sampai ada event: CPU 0% saat diam
     el.run_app(&mut app).map_err(|e| e.to_string())?;
     app.err.map_or(Ok(()), Err)
@@ -4380,6 +4408,14 @@ impl ApplicationHandler<Ev> for App {
             Ev::Sync(r) => return self.sync_done(r),
             Ev::Kb(5, s) => return self.import_note(&s),
             Ev::Kb(6, s) => return self.paste_text(s),
+            Ev::Decoded(src, img) => {
+                if img.is_some() {
+                    self.imgs.insert(src, img);
+                    self.rd = RdView::default();
+                    self.redraw();
+                }
+                return;
+            }
             Ev::Asset(name) => {
                 // Gambar tadi dilewati (belum terbaca): decode ulang dan susun lagi.
                 self.imgs.retain(|k, v| v.is_some() || k.trim_start_matches("./") != name);
