@@ -24,6 +24,9 @@ export async function opfs_load() {
   const t = await dir.getDirectoryHandle('.trash', { create: true });
   for await (const [name, h] of t.entries())
     if (h.kind === 'file') { const f = await h.getFile(); out.push('.trash/' + name, await f.text(), f.lastModified); }
+  const a = await dir.getDirectoryHandle('assets', { create: true });
+  for await (const [name, h] of a.entries())
+    if (h.kind === 'file') { const f = await h.getFile(); out.push('assets/' + name, new Uint8Array(await f.arrayBuffer()), f.lastModified); }
   return out;
 }
 const put = async (d, name, text) => {
@@ -34,6 +37,11 @@ const put = async (d, name, text) => {
 // Antrean: dua simpanan ke berkas yang sama tidak boleh saling salip.
 const run = f => { q = q.then(f).catch(e => console.error('TilDown: OPFS', e)); };
 export function opfs_write(name, text) { run(() => put(dir, name, text)); }
+// `bytes` adalah tampilan memori wasm: salin sebelum menunggu.
+export function opfs_asset(name, bytes) {
+  const b = bytes.slice();
+  run(async () => put(await dir.getDirectoryHandle('assets', { create: true }), name, b));
+}
 const trashDir = () => dir.getDirectoryHandle('.trash', { create: true });
 export function opfs_trash(name, dst, text) {
   run(async () => { await put(await trashDir(), dst, text); await dir.removeEntry(name); });
@@ -82,14 +90,33 @@ export function kb_init(cb) {
   document.addEventListener('pointerup', (e) => {
     if (e.pointerType !== 'mouse' && kbOn) kb.focus({ preventScroll: true });
   }, true);
-  // Drop berkas .md/.txt → catatan baru (jenis 5).
+  // Drop berkas .md/.txt → catatan baru (jenis 5); gambar → assets/.
+  const isImg = f => /^image\/(png|jpeg|gif|webp)$/.test(f.type);
+  const img = async f => imgCb?.(f.name || 'pasted.png', new Uint8Array(await f.arrayBuffer()));
   document.addEventListener('dragover', e => e.preventDefault());
   document.addEventListener('drop', async e => {
     e.preventDefault();
     for (const f of e.dataTransfer.files)
       if (/\.(md|markdown|txt)$/i.test(f.name)) cb(5, await f.text());
+      else if (isImg(f)) await img(f);
+  });
+  // Ctrl+V tidak diteruskan ke winit (yang mencegah default keydown), supaya
+  // browser mengirim `paste` berisi clipboard sistem: teks (jenis 6) atau gambar.
+  addEventListener('keydown', e => {
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 'v' && e.target !== kb)
+      e.stopImmediatePropagation();
+  }, true);
+  document.addEventListener('paste', e => {
+    const f = [...e.clipboardData.files].find(isImg);
+    if (f) { e.preventDefault(); img(f); return; }
+    if (e.target === kb) return; // teks lewat `input` textarea
+    e.preventDefault();
+    const t = e.clipboardData.getData('text/plain');
+    if (t) cb(6, t);
   });
 }
+let imgCb;
+export function img_init(cb) { imgCb = cb; }
 export function kb_editing(on) {
   kbOn = on;
   if (!on && document.activeElement === kb) kb.blur();
@@ -111,6 +138,7 @@ extern "C" {
     #[wasm_bindgen(catch)]
     async fn opfs_load() -> Result<JsValue, JsValue>;
     fn opfs_write(name: &str, text: &str);
+    fn opfs_asset(name: &str, bytes: &[u8]);
     fn opfs_trash(name: &str, dst: &str, text: &str);
     fn opfs_untrash(name: &str, to: &str, text: &str);
     fn opfs_purge(name: &str);
@@ -121,17 +149,26 @@ extern "C" {
     pub fn kb_editing(on: bool);
     #[wasm_bindgen(js_name = kb_init)]
     fn kb_init_js(cb: &Closure<dyn FnMut(u8, String)>);
+    #[wasm_bindgen(js_name = img_init)]
+    fn img_init_js(cb: &Closure<dyn FnMut(String, Vec<u8>)>);
     #[wasm_bindgen(catch, js_name = http_post)]
     async fn http_post_js(url: &str, token: &str, body: &str) -> Result<JsValue, JsValue>;
 }
 
 /// Pasang keyboard layar; `f(jenis, teks)` dipanggil untuk tiap ketikan
 /// (1 = preedit, 2 = teks, 3 = Enter, 4 = Backspace), juga isi berkas
-/// yang di-drop (5).
+/// yang di-drop (5) dan teks yang ditempel (6).
 pub fn kb_init(f: impl FnMut(u8, String) + 'static) {
     let c = Closure::<dyn FnMut(u8, String)>::new(f);
     kb_init_js(&c);
     c.forget(); // hidup selama halaman
+}
+
+/// Gambar yang ditempel atau di-drop: `f(nama, isi)`.
+pub fn img_init(f: impl FnMut(String, Vec<u8>) + 'static) {
+    let c = Closure::<dyn FnMut(String, Vec<u8>)>::new(f);
+    img_init_js(&c);
+    c.forget();
 }
 
 /// `POST` untuk sync → (status, isi).
@@ -146,6 +183,8 @@ pub async fn http_post(url: &str, token: &str, body: &str) -> Result<(u16, Strin
 
 thread_local! {
     static FILES: RefCell<HashMap<String, (String, SystemTime)>> = RefCell::new(HashMap::new());
+    /// Gambar di `assets/`, kunci `assets/<nama>`.
+    static ASSETS: RefCell<HashMap<String, Vec<u8>>> = RefCell::new(HashMap::new());
 }
 
 /// Muat semua berkas OPFS ke cermin. Dipanggil sekali sebelum `Store::open`.
@@ -154,6 +193,11 @@ pub async fn preload() -> Result<(), String> {
     let a = js_sys::Array::from(&v);
     FILES.with_borrow_mut(|m| {
         for k in (0..a.length()).step_by(3) {
+            if let Some(name) = a.get(k).as_string().filter(|n| n.starts_with("assets/")) {
+                let b = js_sys::Uint8Array::new(&a.get(k + 1)).to_vec();
+                ASSETS.with_borrow_mut(|m| m.insert(name, b));
+                continue;
+            }
             let (Some(name), Some(text), Some(ms)) = (
                 a.get(k).as_string(),
                 a.get(k + 1).as_string(),
@@ -187,7 +231,19 @@ pub fn read(_: &Path, name: &str) -> Option<String> {
 }
 
 pub fn exists(_: &Path, name: &str) -> bool {
-    FILES.with_borrow(|m| m.contains_key(name))
+    FILES.with_borrow(|m| m.contains_key(name)) || ASSETS.with_borrow(|m| m.contains_key(name))
+}
+
+pub fn read_bytes(_: &Path, name: &str) -> Option<Vec<u8>> {
+    ASSETS.with_borrow(|m| m.get(name).cloned())
+}
+
+/// Hanya untuk `assets/<nama>`.
+pub fn write_bytes(_: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
+    let file = name.strip_prefix("assets/").ok_or(io::ErrorKind::InvalidInput)?;
+    opfs_asset(file, bytes);
+    ASSETS.with_borrow_mut(|m| m.insert(name.to_owned(), bytes.to_vec()));
+    Ok(())
 }
 
 // ponytail: penulisan OPFS selesai di latar. Tab yang ditutup tepat saat

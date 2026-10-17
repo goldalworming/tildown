@@ -58,6 +58,9 @@ pub enum Ev {
     /// 5 = isi berkas markdown yang di-drop.
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     Kb(u8, String),
+    /// Gambar yang ditempel atau di-drop (web): nama, isi.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    Img(String, Vec<u8>),
 }
 
 /// Sentuhan satu jari di luar penampil: tap = klik, geser = gulir.
@@ -698,8 +701,26 @@ fn save_download(name: &str, bytes: &[u8]) -> Result<String, String> {
 /// Gambar lokal relatif terhadap folder catatan. Gambar web tidak diunduh.
 // ponytail: decode sinkron di thread UI saat mode baca dibangun. Pindahkan ke
 // thread latar (pola decode worker stylegen) bila gambar besar terasa macet.
+/// Isi berkas gambar lokal. Web: hanya `assets/` di OPFS.
+fn img_bytes(dir: &Path, src: &str) -> Option<Vec<u8>> {
+    if cfg!(target_arch = "wasm32") {
+        return disk_asset(dir, src);
+    }
+    std::fs::read(img_path(dir, src)?).ok()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn disk_asset(dir: &Path, src: &str) -> Option<Vec<u8>> {
+    crate::web::read_bytes(dir, src.trim_start_matches("./"))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn disk_asset(_: &Path, _: &str) -> Option<Vec<u8>> {
+    None
+}
+
 fn decode_img(dir: &Path, src: &str) -> Option<Img> {
-    let mut img = image::open(img_path(dir, src)?).ok()?;
+    let mut img = image::load_from_memory(&img_bytes(dir, src)?).ok()?;
     if img.width() > 1600 || img.height() > 1600 {
         img = img.thumbnail(1600, 1600);
     }
@@ -1557,9 +1578,8 @@ fn clip_get() -> Option<String> {
 #[cfg(target_os = "android")]
 fn clip_set(_: &str) {}
 
-// ponytail: membaca clipboard browser itu async dan butuh izin, jadi Ctrl+V di
-// web hanya menempel yang terakhir disalin di aplikasi ini. Tambahkan
-// `navigator.clipboard.readText` lewat user event bila tempel dari luar dibutuhkan.
+// Web: Ctrl+V sampai lewat event `paste` (lihat `web.rs`, `paste_text`);
+// CLIP hanya cadangan untuk tempel di dalam aplikasi.
 #[cfg(target_arch = "wasm32")]
 thread_local!(static CLIP: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) });
 
@@ -1567,6 +1587,14 @@ thread_local!(static CLIP: std::cell::RefCell<String> = const { std::cell::RefCe
 fn clip_get() -> Option<String> {
     Some(CLIP.with_borrow(String::clone)).filter(|s| !s.is_empty())
 }
+
+#[cfg(target_arch = "wasm32")]
+fn clip_remember(s: &str) {
+    CLIP.set(s.to_owned());
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn clip_remember(_: &str) {}
 
 #[cfg(target_arch = "wasm32")]
 fn clip_set(s: &str) {
@@ -1762,6 +1790,8 @@ pub fn run() -> Result<(), String> {
             let proxy = el.create_proxy();
             let kb = proxy.clone();
             crate::web::kb_init(move |k, s| _ = kb.send_event(Ev::Kb(k, s)));
+            let im = proxy.clone();
+            crate::web::img_init(move |n, b| _ = im.send_event(Ev::Img(n, b)));
             app.proxy = Some(proxy);
             el.spawn_app(app);
             Ok::<_, String>(())
@@ -1963,6 +1993,15 @@ impl App {
             }
             Err(e) => self.status = format!("Couldn't add image: {e}"),
         }
+    }
+
+    /// Tempel dari clipboard sistem (web, lewat event `paste`).
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    fn paste_text(&mut self, t: String) {
+        clip_remember(&t);
+        let multi = self.settings.is_none() && self.focus == Focus::Editor;
+        let t = if multi { t.replace("\r\n", "\n") } else { t.replace(['\r', '\n'], " ") };
+        self.soft_key(2, t);
     }
 
     fn paste_image(&mut self) -> bool {
@@ -3337,12 +3376,11 @@ impl App {
         let Some(z) = &self.zoom else { return };
         let (src, kind) = (z.src.clone(), z.kind);
         let r = match kind {
-            DiaKind::Image => img_path(&self.store.dir, &src)
+            DiaKind::Image => img_bytes(&self.store.dir, &src)
                 .ok_or_else(|| "not a local image".to_owned())
-                .and_then(|p| {
-                    let b = std::fs::read(&p).map_err(|e| e.to_string())?;
-                    let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("image.png");
-                    Ok((name.to_owned(), b))
+                .map(|b| {
+                    let name = src.rsplit(['/', '\\']).next().filter(|n| !n.is_empty());
+                    (name.unwrap_or("image.png").to_owned(), b)
                 }),
             _ => {
                 let title: String = store::title_of(&self.doc.text)
@@ -4336,6 +4374,11 @@ impl ApplicationHandler<Ev> for App {
             Ev::Gpu(g) => g,
             Ev::Sync(r) => return self.sync_done(r),
             Ev::Kb(5, s) => return self.import_note(&s),
+            Ev::Kb(6, s) => return self.paste_text(s),
+            Ev::Img(n, b) => {
+                self.add_image(&n, &b);
+                return self.redraw();
+            }
             Ev::Kb(k, s) => return self.soft_key(k, s),
         };
         // `Resized` yang datang selama GPU disiapkan (web) tidak sampai ke surface.

@@ -150,6 +150,18 @@ mod disk {
         dir.join(name).exists()
     }
 
+    pub fn read_bytes(dir: &Path, name: &str) -> Option<Vec<u8>> {
+        fs::read(dir.join(name)).ok()
+    }
+
+    pub fn write_bytes(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
+        let p = dir.join(name);
+        if let Some(d) = p.parent() {
+            fs::create_dir_all(d)?;
+        }
+        fs::write(p, bytes)
+    }
+
     /// Tulis atomik: berkas `.tmp` di-fsync lalu di-rename, jadi berkas lama
     /// tidak pernah setengah tertulis kalau listrik mati.
     pub fn write(dir: &Path, name: &str, text: &str) -> io::Result<SystemTime> {
@@ -403,32 +415,26 @@ impl Store {
 
     /// Simpan gambar ke `assets/<stempel>-<nama>`; mengembalikan path relatif
     /// untuk tautan markdown. Nama dibersihkan supaya tautan tanpa spasi.
-    // ponytail: hanya desktop, dan `assets/` tidak ikut sync. Web perlu OPFS
-    // biner + tampilan gambar; sync perlu R2.
+    // ponytail: `assets/` tidak ikut sync; itu perlu R2.
     pub fn add_asset(&self, name: &str, bytes: &[u8]) -> io::Result<String> {
-        #[cfg(target_arch = "wasm32")]
-        {
-            let _ = (name, bytes);
-            Err(io::Error::new(io::ErrorKind::Unsupported, "not in the web version yet"))
+        let clean: String = name
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c } else { '-' })
+            .collect();
+        let base = stamp(SystemTime::now());
+        let mut file = format!("assets/{base}-{clean}");
+        let mut k = 2;
+        while disk::exists(&self.dir, &file) {
+            file = format!("assets/{base}-{k}-{clean}");
+            k += 1;
         }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let clean: String = name
-                .chars()
-                .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c } else { '-' })
-                .collect();
-            let dir = self.dir.join("assets");
-            std::fs::create_dir_all(&dir)?;
-            let base = stamp(SystemTime::now());
-            let mut file = format!("{base}-{clean}");
-            let mut k = 2;
-            while dir.join(&file).exists() {
-                file = format!("{base}-{k}-{clean}");
-                k += 1;
-            }
-            std::fs::write(dir.join(&file), bytes)?;
-            Ok(format!("assets/{file}"))
-        }
+        disk::write_bytes(&self.dir, &file, bytes)?;
+        Ok(file)
+    }
+
+    /// Isi gambar lokal; `rel` relatif ke folder catatan.
+    pub fn read_asset(&self, rel: &str) -> Option<Vec<u8>> {
+        disk::read_bytes(&self.dir, rel.trim_start_matches("./"))
     }
 
     /// Berkas bantu di folder catatan (mis. `.sync`).
