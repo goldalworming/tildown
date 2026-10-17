@@ -24,6 +24,7 @@ ab_glyph = "0.2"   # rasterizer portabel; outline dibaca saat dibutuhkan (fontdu
 pulldown-cmark = { version = "0.13", default-features = false }   # mode baca
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 web-time = "1"     # Instant/SystemTime yang juga jalan di wasm (re-export std di native)
+serde_json = "1"  # protokol sync
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2"
@@ -32,6 +33,7 @@ js-sys = "0.3"
 
 [target.'cfg(not(any(target_os = "android", target_arch = "wasm32")))'.dependencies]
 arboard = { version = "3", default-features = false }   # clipboard desktop
+ureq = "3"         # HTTPS ke server sync (rustls)
 
 [profile.dev.package."*"]
 opt-level = 3

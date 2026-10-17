@@ -1,0 +1,23 @@
+{
+  "name": "tildown-sync",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "node --test test.mjs"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  },
+  "cloudflare": {
+    "bindings": {
+      "TOKEN": {
+        "description": "Secret token for the TilDown app. Use a long random string (min. 32 characters), e.g. from `openssl rand -hex 32`. Enter the same token in TilDown → Settings → Sync."
+      },
+      "NOTES": {
+        "description": "Durable Object (SQLite) that stores your notes."
+      }
+    }
+  }
+}

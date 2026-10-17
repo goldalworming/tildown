@@ -14,6 +14,7 @@ mod mermaid;
 mod plantuml;
 pub mod puml_render;
 pub mod store;
+mod sync;
 mod text;
 mod vector;
 #[cfg(target_arch = "wasm32")]

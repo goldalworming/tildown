@@ -1,0 +1,3 @@
+# Secret shared with the TilDown app. Use a long random string (min. 32 chars),
+# e.g. the output of `openssl rand -hex 32`.
+TOKEN=change-me-to-a-long-random-string

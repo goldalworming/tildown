@@ -22,8 +22,43 @@ Built from scratch in Rust on **wgpu + winit**. One codebase runs on desktop and
   - **Mermaid**: flowcharts and sequence diagrams.
   - **PlantUML**: sequence, activity, class, object, use case, component, state, mindmap, WBS, gantt, timing, JSON, YAML, nwdiag, salt, EBNF, regex, Chen ER, chart, git, wire, ditaa and more.
   - Click a diagram to open a viewer with zoom, pan and pinch.
+- **Sync** across devices through your own Cloudflare Worker on the free plan, so your notes never pass through anyone else's server. See [Sync](#sync).
 - **Trash**: deleted notes can be restored for 30 days.
 - **Settings**: light, dark or system theme, text size, line width, and whether notes open in edit or read mode.
+
+## Sync
+
+TilDown syncs through a small server that you deploy to **your own** Cloudflare account. It is a Worker plus a SQLite Durable Object, and the free Workers plan is enough. Your notes stay in your account.
+
+1. Click the button below. Sign in to Cloudflare, and when you are asked for `TOKEN`, enter a long random string, for example the output of `openssl rand -hex 32`. Keep it somewhere safe.
+
+   [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/goldalworming/tildown/tree/main/server)
+
+2. In TilDown, open **Settings → Sync** and enter:
+   - the Worker URL, for example `https://tildown-sync.<you>.workers.dev`
+   - the same token
+3. Press **Connect**. Do the same on your other devices.
+
+How syncing works:
+- TilDown sends changes a few seconds after you save, checks for new changes every minute while the window is active, and syncs when you switch away.
+- If the same note was edited on two devices, both versions are kept. The other one appears as a new note titled "… (conflict)".
+- Notes deleted on one device go to the Trash on the others.
+
+To deploy by hand instead of using the button:
+
+```sh
+cd server
+npm install
+npx wrangler deploy
+npx wrangler secret put TOKEN
+```
+
+To run the server locally, put `TOKEN=...` in `server/.dev.vars`, then run `npm run dev`. `npm test` runs the sync rules against SQLite.
+
+Notes on security:
+- Anyone who has the token can read and change your notes, so keep it secret.
+- The app stores the token in `.sync` inside your notes folder.
+- Don't also sync that folder with another tool such as Dropbox or Syncthing, because the two sync methods would conflict.
 
 ## Keyboard shortcuts
 
@@ -71,8 +106,10 @@ src/
   app.rs        winit shell and the whole UI
   mermaid.rs    Mermaid parser and layout
   plantuml/     PlantUML parsers and layouts
+  sync.rs       sync client (push/pull, conflicts)
   web.rs        wasm: OPFS mirror, clipboard, links
 web/            index.html and build script
+server/         sync server: Cloudflare Worker + Durable Object
 docs/PRD.md     product requirements (Indonesian)
 ```
 

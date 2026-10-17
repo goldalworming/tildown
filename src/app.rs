@@ -28,6 +28,7 @@ use crate::gpu::{Gpu, Rect, Rgba};
 use crate::md::{self, BKind, Kind, Tok};
 use crate::puml_render::{puml_col, puml_lay};
 use crate::store::{self, Store};
+use crate::sync::{self, Sync};
 use crate::text::{layout, Face, Fonts, Lay, Row, Style, ATLAS};
 
 const BODY: f32 = 16.0;
@@ -45,6 +46,15 @@ const GUTTER: f32 = 32.0;
 /// perubahan pertama (PRD §5).
 const SAVE_DELAY: Duration = Duration::from_millis(1000);
 const SAVE_MAX: Duration = Duration::from_secs(5);
+/// Sync: kirim sekian detik setelah simpan; tarik berkala selama jendela aktif.
+const SYNC_DELAY: Duration = Duration::from_secs(3);
+const SYNC_POLL: Duration = Duration::from_secs(60);
+
+/// User event: GPU siap (web, async) atau jawaban server sync.
+pub enum Ev {
+    Gpu(Gpu),
+    Sync(Result<String, String>),
+}
 
 /// Ukuran heading editor relatif terhadap isi (# 24, ## 20, ### 18).
 fn hscale(n: u8) -> f32 {
@@ -161,6 +171,10 @@ enum Btn {
     Purge(usize),
     MatchPrev,
     MatchNext,
+    /// Tab Sync: isian (0 = URL, 1 = token), Connect/Disconnect, Sync now.
+    Field(u8),
+    SyncConnect,
+    SyncNow,
 }
 
 /// Pilihan lebar kolom (Narrow / Normal / Wide).
@@ -1571,9 +1585,18 @@ pub struct App {
     size: (f32, f32),
     words: (u64, usize),
     icon: CursorIcon,
-    /// Web: GPU disiapkan async lalu dikirim balik sebagai user event.
-    #[cfg(target_arch = "wasm32")]
-    proxy: Option<winit::event_loop::EventLoopProxy<Gpu>>,
+    /// Jalan kembali ke event loop: GPU web (async) dan jawaban sync.
+    proxy: Option<winit::event_loop::EventLoopProxy<Ev>>,
+    /// Sync ke server sendiri (`sync.rs`), disimpan di berkas `.sync`.
+    sync: Sync,
+    sync_due: Option<Instant>,
+    sync_busy: bool,
+    /// Hasil sync terakhir: waktu, atau pesan galat.
+    sync_last: Option<Result<SystemTime, String>>,
+    /// Isian tab Sync [URL, token] dan yang sedang diketik.
+    sync_in: [Doc; 2],
+    sync_edit: Option<usize>,
+    focused: bool,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1582,10 +1605,11 @@ pub fn run() -> Result<(), String> {
     let dir = store::default_dir();
     let store =
         Store::open(dir.clone()).map_err(|e| format!("folder catatan {}: {e}", dir.display()))?;
-    let mut app = App::new(store, fonts);
     let el = EventLoop::with_user_event()
         .build()
         .map_err(|e| e.to_string())?;
+    let mut app = App::new(store, fonts);
+    app.proxy = Some(el.create_proxy());
     el.set_control_flow(ControlFlow::Wait); // tidur sampai ada event: CPU 0% saat diam
     el.run_app(&mut app).map_err(|e| e.to_string())?;
     app.err.map_or(Ok(()), Err)
@@ -1633,6 +1657,7 @@ impl App {
             Mode::Edit
         };
         let num = |k: &str, d: f32| get(k).and_then(|v| v.parse().ok()).unwrap_or(d);
+        let sync = Sync::load(&store.read_file(".sync").unwrap_or_default());
         let mut app = App {
             window: None,
             gpu: None,
@@ -1687,8 +1712,14 @@ impl App {
             size: (1.0, 1.0),
             words: (u64::MAX, 0),
             icon: CursorIcon::Default,
-            #[cfg(target_arch = "wasm32")]
             proxy: None,
+            sync_due: sync.on().then(Instant::now),
+            sync_busy: false,
+            sync_last: None,
+            sync_in: [Doc::new(&sync.url), Doc::new(&sync.token)],
+            sync_edit: None,
+            focused: true,
+            sync,
         };
         app.load(cur);
         app.refilter();
@@ -1771,6 +1802,7 @@ impl App {
             self.status = format!("Couldn't delete: {e}");
             return;
         }
+        self.sync_soon();
         self.refilter();
         let i = match self.res.first() {
             Some(&i) => i,
@@ -1791,6 +1823,7 @@ impl App {
                 self.saved_ver = self.doc.version;
                 self.dirty_since = None;
                 self.status.clear();
+                self.sync_soon();
             }
             Err(e) => {
                 self.status = format!("Couldn't save: {e}");
@@ -1847,10 +1880,16 @@ impl App {
         let Ok(changed) = self.store.rescan(dirty.then_some(id.as_str())) else {
             return;
         };
+        self.reload_cur(&id, &changed);
+    }
+
+    /// Sesudah catatan berubah dari luar: cari lagi catatan `id` yang terbuka
+    /// dan muat ulang bila isinya berubah; kalau hilang, buka yang teratas.
+    fn reload_cur(&mut self, id: &str, changed: &[String]) {
         match self.store.notes.iter().position(|n| n.id == id) {
             Some(i) => {
                 self.cur = i;
-                if changed.contains(&id) {
+                if changed.iter().any(|c| c == id) {
                     let (a, c) = (self.doc.anchor, self.doc.cursor);
                     let t = self.store.notes[i].text.clone();
                     self.doc.set_text(&t);
@@ -1868,6 +1907,94 @@ impl App {
             }
         }
         self.refilter();
+    }
+
+    // --- sync -----------------------------------------------------------
+
+    /// Ada perubahan lokal: kirim sebentar lagi.
+    fn sync_soon(&mut self) {
+        if self.sync.on() {
+            let t = Instant::now() + SYNC_DELAY;
+            self.sync_due = Some(self.sync_due.map_or(t, |d| d.min(t)));
+        }
+    }
+
+    fn sync_start(&mut self) {
+        if !self.sync.on() || self.sync_busy {
+            return;
+        }
+        let Some(proxy) = self.proxy.clone() else {
+            return;
+        };
+        self.save_now();
+        self.sync_due = None;
+        self.sync_busy = true;
+        let body = self.sync.request(&self.store);
+        sync::post(self.sync.endpoint(), self.sync.token.clone(), body, move |r| {
+            let _ = proxy.send_event(Ev::Sync(r));
+        });
+        self.redraw();
+    }
+
+    fn sync_done(&mut self, r: Result<String, String>) {
+        self.sync_busy = false;
+        if !self.sync.on() {
+            return; // diputus selagi menunggu
+        }
+        self.save_now();
+        let id = self.store.notes[self.cur].id.clone();
+        let now = Instant::now();
+        let mut next = self.focused.then(|| now + SYNC_POLL);
+        match r.and_then(|body| self.sync.apply(&mut self.store, &body)) {
+            Ok(a) => {
+                self.sync_last = Some(Ok(SystemTime::now()));
+                // Masih ada halaman berikut, atau ada versi lokal/salinan
+                // konflik yang perlu dikirim.
+                if a.more || a.conflicts > 0 {
+                    next = Some(now);
+                }
+                if let Err(e) = self.store.write_file(".sync", &self.sync.dump()) {
+                    self.sync_last = Some(Err(e.to_string()));
+                }
+                self.reload_cur(&id, &a.changed);
+            }
+            Err(e) => self.sync_last = Some(Err(e)),
+        }
+        self.sync_due = [self.sync_due, next].into_iter().flatten().min();
+        self.redraw();
+    }
+
+    /// Tombol Connect / Disconnect.
+    fn sync_connect(&mut self) {
+        if self.sync.on() {
+            self.sync = Sync::default();
+            self.sync_due = None;
+        } else {
+            let (url, token) = (self.sync_in[0].text.clone(), self.sync_in[1].text.clone());
+            self.sync.connect(&url, &token);
+            if !self.sync.on() {
+                self.sync_last = Some(Err("enter the server URL and token".into()));
+                return;
+            }
+            self.sync_in[0] = Doc::new(&self.sync.url);
+            self.sync_edit = None;
+            self.sync_due = Some(Instant::now());
+        }
+        self.sync_last = None;
+        let _ = self.store.write_file(".sync", &self.sync.dump());
+    }
+
+    fn sync_status(&self) -> (String, Rgba) {
+        let t = self.theme;
+        if self.sync_busy {
+            return ("Syncing…".into(), t.dim);
+        }
+        match (&self.sync_last, self.sync.on()) {
+            (Some(Err(e)), _) => (format!("Sync failed: {e}"), t.err),
+            (_, false) => ("Not connected".into(), t.dim),
+            (Some(Ok(w)), _) => (format!("Last synced {}", store::ago(*w, SystemTime::now())), t.dim),
+            (None, true) => ("Connected".into(), t.dim),
+        }
     }
 
     // --- tata letak -----------------------------------------------------
@@ -2009,7 +2136,7 @@ impl App {
         // Tab: label + (lencana jumlah untuk Trash), jarak 24.
         let px = 14.0 * s;
         let mut x = d.x + 24.0 * s;
-        for (i, label) in ["General", "Trash"].iter().enumerate() {
+        for (i, label) in ["General", "Trash", "Sync"].iter().enumerate() {
             let mut tw = self.tw(Face::Medium, px, label);
             if i == 1 && !self.trash.is_empty() {
                 tw += 8.0 * s + self.badge_w();
@@ -2038,6 +2165,18 @@ impl App {
             row(&mut v, y + 28.0 * s, 3, &|i| Btn::Width(i as u8));
             y += sec;
             row(&mut v, y + 28.0 * s, 2, &|i| Btn::OpenIn(i as u8));
+        } else if self.settings == Some(2) {
+            // Teks pembuka 2 baris, lalu dua isian (judul 20 + 8 + 36), lalu tombol.
+            let fy = |k: f32| (y + (64.0 + 28.0) * s + k * 88.0 * s).round();
+            for k in 0..2u8 {
+                v.push((Rect::new(bx, fy(k as f32), bw, (36.0 * s).round()), Btn::Field(k)));
+            }
+            let by = y + (64.0 + 2.0 * 88.0 + 8.0) * s;
+            if self.sync.on() {
+                row(&mut v, by, 2, &|i| if i == 0 { Btn::SyncConnect } else { Btn::SyncNow });
+            } else {
+                row(&mut v, by, 1, &|_| Btn::SyncConnect);
+            }
         } else {
             if !self.trash.is_empty() {
                 let ew = self.tw(Face::Medium, px, "Empty trash") + 24.0 * s;
@@ -2109,12 +2248,20 @@ impl App {
                         Ok(k) => {
                             self.refilter();
                             self.open_note(k);
+                            self.sync_soon();
                         }
                         Err(e) => self.status = format!("Couldn't restore: {e}"),
                     }
                 }
                 self.trash = self.store.trashed();
             }
+            Btn::Field(i) => {
+                let d = &mut self.sync_in[i as usize];
+                d.set_cursor(d.text.len(), false);
+                self.sync_edit = Some(i as usize);
+            }
+            Btn::SyncConnect => self.sync_connect(),
+            Btn::SyncNow => self.sync_due = Some(Instant::now()),
             Btn::MatchPrev => self.goto_match(-1),
             Btn::MatchNext => self.goto_match(1),
             Btn::Purge(i) => {
@@ -2196,6 +2343,7 @@ impl App {
 
     fn open_settings(&mut self, tab: u8) {
         self.settings = Some(tab);
+        self.sync_edit = (tab == 2 && !self.sync.on()).then_some(0);
         self.trash = self.store.trashed();
     }
 
@@ -2330,10 +2478,16 @@ impl App {
         // AltGr di Windows dilaporkan sebagai Ctrl+Alt; tanpa `!alt_key`,
         // karakter seperti '@' di layout Jerman/Polandia akan tertelan.
         if self.settings.is_some() {
-            if ev.logical_key == Key::Named(NamedKey::Escape) {
-                self.settings = None;
-                self.redraw();
+            let m = self.mods;
+            let ctrl = (m.control_key() && !m.alt_key()) || m.super_key();
+            match (&ev.logical_key, self.sync_edit.filter(|_| self.settings == Some(2))) {
+                (Key::Named(NamedKey::Escape), _) => self.settings = None,
+                (Key::Named(NamedKey::Enter), Some(_)) => self.sync_connect(),
+                (Key::Named(NamedKey::Tab), Some(i)) => self.sync_edit = Some(1 - i),
+                (_, Some(i)) => _ = edit_common(&mut self.sync_in[i], &ev, ctrl, m.shift_key(), false),
+                _ => {}
             }
+            self.redraw();
             return;
         }
         if self.zoom.is_some() {
@@ -2556,6 +2710,13 @@ impl App {
             Ime::Preedit(s, _) => self.preedit = s,
             Ime::Commit(s) => {
                 self.preedit.clear();
+                if self.settings.is_some() {
+                    if let Some(i) = self.sync_edit.filter(|_| self.settings == Some(2)) {
+                        self.sync_in[i].insert(&s);
+                    }
+                    self.redraw();
+                    return;
+                }
                 match (self.focus, self.mode) {
                     (Focus::Search, _) => {
                         self.search.insert(&s);
@@ -2825,6 +2986,7 @@ impl App {
                 }
                 ("settings", _) => self.open_settings(0),
                 ("trash", _) => self.open_settings(1),
+                ("sync", _) => self.open_settings(2),
                 ("dark", _) => {
                     self.theme_pref = 2;
                     self.apply_theme();
@@ -3374,6 +3536,24 @@ impl App {
             let b = p.base(Face::Regular, px, vy, 20.0 * s);
             let v = concat!("TilDown v", env!("CARGO_PKG_VERSION"));
             p.text(bx, b, Face::Regular, px, v, t.dim, bw);
+        } else if self.settings == Some(2) {
+            for (k, l) in [
+                "Sync notes through your own Cloudflare Worker (free plan).",
+                "See “Sync” in the TilDown README to deploy it in a few clicks.",
+            ]
+            .iter()
+            .enumerate()
+            {
+                let b = p.base(Face::Regular, px, y0 + k as f32 * 22.0 * s, 20.0 * s);
+                p.text(bx, b, Face::Regular, px, l, t.dim, bw);
+            }
+            for (k, l) in ["Server URL", "Token"].iter().enumerate() {
+                let b = p.base(Face::Semi, px, y0 + (64.0 + k as f32 * 88.0) * s, 20.0 * s);
+                p.text(bx, b, Face::Semi, px, l, t.fg, bw);
+            }
+            let (msg, c) = self.sync_status();
+            let b = p.base(Face::Regular, px, y0 + (64.0 + 2.0 * 88.0 + 8.0 + 36.0 + 16.0) * s, 20.0 * s);
+            p.text(bx, b, Face::Regular, px, &msg, c, bw);
         } else if self.trash.is_empty() {
             let cy = (y0 + foot) / 2.0;
             p.icon_in("trash", Rect::new(d.x, cy - 40.0 * s, d.w, 24.0 * s), 24.0 * s, t.dim);
@@ -3417,7 +3597,7 @@ impl App {
                 Btn::Tab(i) => {
                     let on = self.settings == Some(i);
                     let c = if on || hot { t.fg } else { t.dim };
-                    let label = ["General", "Trash"][i as usize];
+                    let label = ["General", "Trash", "Sync"][i as usize];
                     let bl = p.base(Face::Medium, px, r.y, r.h);
                     let lx = p.text(r.x, bl, Face::Medium, px, label, c, f32::INFINITY);
                     if on {
@@ -3432,6 +3612,34 @@ impl App {
                 Btn::Theme(i) => opt(p, r, self.theme_pref == i, ["System", "Light", "Dark"][i as usize]),
                 Btn::Width(i) => opt(p, r, self.col == WIDTHS[i as usize], ["Narrow", "Normal", "Wide"][i as usize]),
                 Btn::OpenIn(i) => opt(p, r, (self.open_in == Mode::Read) == (i == 1), ["Edit", "Read"][i as usize]),
+                Btn::Field(i) => {
+                    let on = self.sync_edit == Some(i as usize);
+                    p.rframe(r, 6.0 * s, lw, if on { t.accent } else if hot { t.dim } else { t.border });
+                    let d = &self.sync_in[i as usize];
+                    // Token disamarkan.
+                    let show = |x: &str| if i == 1 { "•".repeat(x.chars().count()) } else { x.to_owned() };
+                    let (tx, tw) = (r.x + 12.0 * s, r.w - 24.0 * s);
+                    let bl = p.base(Face::Regular, px, r.y, r.h);
+                    if d.text.is_empty() {
+                        let hint = ["https://tildown-sync.<you>.workers.dev", "The TOKEN you set when deploying"];
+                        p.text(tx, bl, Face::Regular, px, hint[i as usize], t.dim, tw);
+                    } else {
+                        p.text(tx, bl, Face::Regular, px, &show(&d.text), t.fg, tw);
+                    }
+                    if on {
+                        let cx = tx + p.f.width(Face::Regular, px, &show(&d.text[..d.cursor]));
+                        let cw = (1.5 * s).round().max(1.0);
+                        p.rect(Rect::new(cx.min(tx + tw).round(), r.y + 9.0 * s, cw, r.h - 18.0 * s), t.fg);
+                    }
+                }
+                Btn::SyncConnect | Btn::SyncNow => {
+                    let label = match b {
+                        Btn::SyncNow => "Sync now",
+                        _ if self.sync.on() => "Disconnect",
+                        _ => "Connect",
+                    };
+                    opt(p, r, b == Btn::SyncConnect && !self.sync.on(), label);
+                }
                 Btn::FsDown | Btn::FsUp => {
                     p.rframe(r, 6.0 * s, lw, if hot { t.dim } else { t.border });
                     p.icon_in(if b == Btn::FsUp { "plus" } else { "minus" }, r, 16.0 * s, t.fg);
@@ -3724,7 +3932,7 @@ impl App {
     }
 }
 
-impl ApplicationHandler<Gpu> for App {
+impl ApplicationHandler<Ev> for App {
     // Dipanggil saat start, dan di Android setiap kali aplikasi kembali ke
     // depan: surface dibuat di sini, bukan di `run`.
     fn resumed(&mut self, el: &ActiveEventLoop) {
@@ -3769,22 +3977,26 @@ impl ApplicationHandler<Gpu> for App {
         self.window = Some(window.clone());
         #[cfg(not(target_arch = "wasm32"))]
         match Gpu::new(window) {
-            Ok(g) => self.user_event(el, g),
+            Ok(g) => self.user_event(el, Ev::Gpu(g)),
             Err(e) => self.fail(el, e),
         }
         #[cfg(target_arch = "wasm32")]
         if let Some(proxy) = self.proxy.clone() {
             wasm_bindgen_futures::spawn_local(async move {
                 match Gpu::new_async(window).await {
-                    Ok(g) => _ = proxy.send_event(g),
+                    Ok(g) => _ = proxy.send_event(Ev::Gpu(g)),
                     Err(e) => crate::web::log_error(&format!("TilDown: GPU {e}")),
                 }
             });
         }
     }
 
-    /// GPU siap (langsung di desktop, async di web).
-    fn user_event(&mut self, _el: &ActiveEventLoop, mut g: Gpu) {
+    /// GPU siap (langsung di desktop, async di web), atau jawaban sync.
+    fn user_event(&mut self, _el: &ActiveEventLoop, ev: Ev) {
+        let mut g = match ev {
+            Ev::Gpu(g) => g,
+            Ev::Sync(r) => return self.sync_done(r),
+        };
         // `Resized` yang datang selama GPU disiapkan (web) tidak sampai ke surface.
         if let Some(w) = &self.window {
             let sz = w.inner_size();
@@ -3822,7 +4034,12 @@ impl ApplicationHandler<Gpu> for App {
             self.save_now();
             self.redraw();
         }
-        el.set_control_flow(match self.save_due {
+        if !self.sync_busy && self.sync_due.is_some_and(|t| Instant::now() >= t) {
+            self.sync_start();
+        }
+        // Selama sync jalan, jawabannya yang membangunkan event loop.
+        let sync_due = self.sync_due.filter(|_| !self.sync_busy);
+        el.set_control_flow(match [self.save_due, sync_due].into_iter().flatten().min() {
             Some(t) => ControlFlow::WaitUntil(t),
             None => ControlFlow::Wait,
         });
@@ -3849,13 +4066,22 @@ impl ApplicationHandler<Gpu> for App {
                 self.redraw();
             }
             WindowEvent::Focused(true) => {
+                self.focused = true;
                 self.rescan();
+                if self.sync.on() {
+                    self.sync_due = Some(Instant::now());
+                }
                 self.redraw();
             }
             // Web tidak pernah memanggil `exiting`: state disimpan di sini juga.
+            // Perubahan dikirim sekarang; tarik berkala berhenti sampai aktif lagi.
             WindowEvent::Focused(false) => {
+                self.focused = false;
                 self.save_now();
                 self.save_state();
+                if self.sync.on() {
+                    self.sync_due = Some(Instant::now());
+                }
             }
             WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
             WindowEvent::KeyboardInput { event, .. } => self.key(event),

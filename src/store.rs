@@ -385,6 +385,31 @@ impl Store {
         (exact, k)
     }
 
+    /// Tulis catatan dari luar (sync) dengan id tertentu; buat bila belum ada.
+    pub fn put(&mut self, id: &str, text: &str) -> io::Result<usize> {
+        let mtime = disk::write(&self.dir, &format!("{id}.md"), text)?;
+        let n = Note::new(id.to_owned(), text.to_owned(), mtime, true);
+        Ok(match self.notes.iter().position(|n| n.id == id) {
+            Some(i) => {
+                self.notes[i] = n;
+                i
+            }
+            None => {
+                self.notes.push(n);
+                self.notes.len() - 1
+            }
+        })
+    }
+
+    /// Berkas bantu di folder catatan (mis. `.sync`).
+    pub fn read_file(&self, name: &str) -> Option<String> {
+        disk::read(&self.dir, name)
+    }
+
+    pub fn write_file(&self, name: &str, text: &str) -> io::Result<()> {
+        disk::write(&self.dir, name, text).map(|_| ())
+    }
+
     pub fn load_state(&self) -> HashMap<String, String> {
         let s = disk::read(&self.dir, ".state").unwrap_or_default();
         s.lines()

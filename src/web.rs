@@ -45,6 +45,11 @@ export function opfs_purge(name) { run(async () => (await trashDir()).removeEntr
 export function open_url(u) { window.open(u, '_blank', 'noopener'); }
 export function clip_write(t) { navigator.clipboard?.writeText(t).catch(() => {}); }
 export function log_error(m) { console.error(m); document.title = 'TilDown — galat'; }
+export async function http_post(url, token, body) {
+  const r = await fetch(url, { method: 'POST', body,
+    headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' } });
+  return [r.status, await r.text()];
+}
 "#)]
 extern "C" {
     #[wasm_bindgen(catch)]
@@ -56,6 +61,18 @@ extern "C" {
     pub fn open_url(u: &str);
     pub fn clip_write(t: &str);
     pub fn log_error(m: &str);
+    #[wasm_bindgen(catch, js_name = http_post)]
+    async fn http_post_js(url: &str, token: &str, body: &str) -> Result<JsValue, JsValue>;
+}
+
+/// `POST` untuk sync → (status, isi).
+pub async fn http_post(url: &str, token: &str, body: &str) -> Result<(u16, String), String> {
+    let v = http_post_js(url, token, body).await.map_err(|e| {
+        e.dyn_ref::<js_sys::Error>()
+            .map_or_else(|| format!("{e:?}"), |e| String::from(e.message()))
+    })?;
+    let a = js_sys::Array::from(&v);
+    Ok((a.get(0).as_f64().unwrap_or(0.0) as u16, a.get(1).as_string().unwrap_or_default()))
 }
 
 thread_local! {
