@@ -4,10 +4,8 @@
 use crate::gpu::Rgba;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::plantuml::{self, Col, Prim};
-#[cfg(not(target_arch = "wasm32"))]
 use crate::text::ATLAS;
 use crate::text::{layout, Face, Fonts, Lay, Style};
-#[cfg(not(target_arch = "wasm32"))]
 use crate::vector;
 
 fn hex(v: u32) -> Rgba {
@@ -181,7 +179,54 @@ pub fn render_png(src: &str, out: &str, k: f32) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+/// Kanvas RGB di CPU untuk ekspor PNG (tombol Download di penampil).
+/// `Fonts` yang dipakai harus milik kanvas sendiri: glyph baru diambil dari
+/// antrean unggah font ke atlas CPU kanvas, bukan ke GPU.
+pub struct Canvas {
+    img: Vec<[f32; 3]>,
+    w: usize,
+    h: usize,
+    atlas: Vec<u8>,
+}
+
+impl Canvas {
+    pub fn new(w: usize, h: usize, bg: Rgba) -> Canvas {
+        Canvas {
+            img: vec![[bg[0], bg[1], bg[2]]; w * h],
+            w,
+            h,
+            atlas: vec![0u8; (ATLAS * ATLAS) as usize],
+        }
+    }
+
+    pub fn mesh(&mut self, m: &vector::Mesh, dx: f32, dy: f32) {
+        let sh = |(p, c): (vector::Pt, Rgba)| ((p.0 + dx, p.1 + dy), c);
+        for t in m.chunks(3) {
+            raster(&mut self.img, self.w, self.h, [sh(t[0]), sh(t[1]), sh(t[2])]);
+        }
+    }
+
+    pub fn rect(&mut self, x: f32, y: f32, w: f32, h: f32, c: Rgba) {
+        fill_rect(&mut self.img, self.w, self.h, x, y, w, h, c);
+    }
+
+    pub fn text(&mut self, f: &mut Fonts, l: &Lay, x: f32, y: f32) {
+        text(&mut self.img, self.w, self.h, f, &mut self.atlas, l, x, y);
+    }
+
+    pub fn png(&self) -> Result<Vec<u8>, String> {
+        let bytes: Vec<u8> = self
+            .img
+            .iter()
+            .flat_map(|p| p.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8))
+            .collect();
+        let img = image::RgbImage::from_raw(self.w as u32, self.h as u32, bytes).ok_or("empty image")?;
+        let mut out = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut out, image::ImageFormat::Png).map_err(|e| e.to_string())?;
+        Ok(out.into_inner())
+    }
+}
+
 fn blend(p: &mut [f32; 3], c: Rgba, a: f32) {
     let a = (c[3] * a).clamp(0.0, 1.0);
     for i in 0..3 {
@@ -190,7 +235,6 @@ fn blend(p: &mut [f32; 3], c: Rgba, a: f32) {
 }
 
 /// Segitiga berwarna per verteks (barisentrik), sampel di tengah piksel.
-#[cfg(not(target_arch = "wasm32"))]
 fn raster(img: &mut [[f32; 3]], w: usize, h: usize, t: [(vector::Pt, Rgba); 3]) {
     let [(a, ca), (b, cb), (c, cc)] = t;
     let area = (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0);
@@ -216,7 +260,7 @@ fn raster(img: &mut [[f32; 3]], w: usize, h: usize, t: [(vector::Pt, Rgba); 3]) 
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::too_many_arguments)]
 fn text(
     img: &mut [[f32; 3]],
     w: usize,
@@ -281,7 +325,7 @@ fn text(
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::too_many_arguments)]
 fn fill_rect(img: &mut [[f32; 3]], w: usize, h: usize, x: f32, y: f32, rw: f32, rh: f32, c: Rgba) {
     for py in (y.round().max(0.0) as usize)..((y + rh).round().max(0.0) as usize).min(h) {
         for px in (x.round().max(0.0) as usize)..((x + rw).round().max(0.0) as usize).min(w) {

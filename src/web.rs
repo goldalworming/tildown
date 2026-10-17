@@ -45,6 +45,13 @@ export function opfs_purge(name) { run(async () => (await trashDir()).removeEntr
 export function open_url(u) { window.open(u, '_blank', 'noopener'); }
 export function clip_write(t) { navigator.clipboard?.writeText(t).catch(() => {}); }
 export function log_error(m) { console.error(m); document.title = 'TilDown — galat'; }
+export function download(name, bytes) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([bytes], { type: 'image/png' }));
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+}
 export async function http_post(url, token, body) {
   const r = await fetch(url, { method: 'POST', body,
     headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' } });
@@ -61,6 +68,7 @@ extern "C" {
     pub fn open_url(u: &str);
     pub fn clip_write(t: &str);
     pub fn log_error(m: &str);
+    pub fn download(name: &str, bytes: &[u8]);
     #[wasm_bindgen(catch, js_name = http_post)]
     async fn http_post_js(url: &str, token: &str, body: &str) -> Result<JsValue, JsValue>;
 }

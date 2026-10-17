@@ -34,7 +34,7 @@ js-sys = "0.3"
 getrandom = { version = "0.2", features = ["js"] }   # crypto.getRandomValues
 
 [target.'cfg(not(any(target_os = "android", target_arch = "wasm32")))'.dependencies]
-arboard = { version = "3", default-features = false }   # clipboard desktop
+arboard = { version = "3", default-features = false, features = ["image-data"] }   # clipboard desktop (teks + gambar)
 ureq = "3"         # HTTPS ke server sync (rustls)
 
 [profile.dev.package."*"]

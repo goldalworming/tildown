@@ -401,6 +401,36 @@ impl Store {
         })
     }
 
+    /// Simpan gambar ke `assets/<stempel>-<nama>`; mengembalikan path relatif
+    /// untuk tautan markdown. Nama dibersihkan supaya tautan tanpa spasi.
+    // ponytail: hanya desktop, dan `assets/` tidak ikut sync. Web perlu OPFS
+    // biner + tampilan gambar; sync perlu R2.
+    pub fn add_asset(&self, name: &str, bytes: &[u8]) -> io::Result<String> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (name, bytes);
+            Err(io::Error::new(io::ErrorKind::Unsupported, "not in the web version yet"))
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let clean: String = name
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c } else { '-' })
+                .collect();
+            let dir = self.dir.join("assets");
+            std::fs::create_dir_all(&dir)?;
+            let base = stamp(SystemTime::now());
+            let mut file = format!("{base}-{clean}");
+            let mut k = 2;
+            while dir.join(&file).exists() {
+                file = format!("{base}-{k}-{clean}");
+                k += 1;
+            }
+            std::fs::write(dir.join(&file), bytes)?;
+            Ok(format!("assets/{file}"))
+        }
+    }
+
     /// Berkas bantu di folder catatan (mis. `.sync`).
     pub fn read_file(&self, name: &str) -> Option<String> {
         disk::read(&self.dir, name)
@@ -484,6 +514,18 @@ mod tests {
     use super::*;
     use std::fs;
     use std::time::Duration;
+
+    #[test]
+    fn assets() {
+        let dir = std::env::temp_dir().join(format!("tildown-assets-{}", std::process::id()));
+        let st = Store::open(dir.clone()).unwrap();
+        let a = st.add_asset("my photo (1).png", b"x").unwrap();
+        let b = st.add_asset("my photo (1).png", b"y").unwrap();
+        assert!(a.starts_with("assets/") && a.ends_with("-my-photo--1-.png"), "{a}");
+        assert_ne!(a, b);
+        assert_eq!(std::fs::read(dir.join(&b)).unwrap(), b"y");
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn dates() {

@@ -159,6 +159,8 @@ enum Btn {
     ZoomOut,
     ZoomIn,
     ZoomClose,
+    /// Penampil: simpan gambar/diagram ke folder Downloads.
+    ZoomSave,
     SetClose,
     Tab(u8),
     Theme(u8),
@@ -187,10 +189,19 @@ const DEPLOY_URL: &str =
 /// Pilihan lebar kolom (Narrow / Normal / Wide).
 const WIDTHS: [f32; 3] = [600.0, 720.0, 880.0];
 
-/// Penampil diagram layar penuh: roda = zoom di pointer, seret = geser.
+/// Isi yang bisa dibuka di penampil: diagram PlantUML ke-n di blok, flowchart
+/// Mermaid, atau gambar (`src` = kunci `imgs`).
+#[derive(Clone, Copy, PartialEq)]
+enum DiaKind {
+    Puml(usize),
+    Mermaid,
+    Image,
+}
+
+/// Penampil diagram/gambar layar penuh: roda = zoom di pointer, seret = geser.
 struct Zoom {
     src: String,
-    idx: Option<usize>,
+    kind: DiaKind,
     /// Skala px per unit PlantUML (0 = pas layar); `built` = skala `view`.
     k: f32,
     built: f32,
@@ -201,6 +212,8 @@ struct Zoom {
     org: (f32, f32),
     /// Jari di layar: (id, posisi) — 1 jari geser, 2 jari pinch.
     touches: Vec<(u64, (f32, f32))>,
+    /// Hasil Download; menggantikan petunjuk di bawah.
+    msg: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -502,9 +515,8 @@ struct RdView {
     decos: Vec<Deco>,
     checks: Vec<(Rect, Range<usize>, bool)>,
     links: Vec<String>,
-    /// Diagram: (kotak, sumber blok, indeks diagram PlantUML di blok;
-    /// `None` = Mermaid native).
-    dias: Vec<(Rect, String, Option<usize>)>,
+    /// Diagram dan gambar yang bisa diklik: (kotak, sumber, jenis).
+    dias: Vec<(Rect, String, DiaKind)>,
     h: f32,
     /// Seleksi mode baca: (jangkar, kepala), masing-masing (indeks item, byte).
     /// Ikut hilang saat tampilan dibangun ulang.
@@ -592,20 +604,90 @@ struct Img {
     tex: Option<usize>,
 }
 
-/// Gambar lokal relatif terhadap folder catatan. Gambar web tidak diunduh.
-// ponytail: decode sinkron di thread UI saat mode baca dibangun. Pindahkan ke
-// thread latar (pola decode worker stylegen) bila gambar besar terasa macet.
-fn decode_img(dir: &Path, src: &str) -> Option<Img> {
+/// Gambar `key` di `r` (diunggah ke GPU saat pertama digambar).
+fn img_quad(p: &mut P, imgs: &mut HashMap<String, Option<Img>>, key: &str, r: Rect) {
+    let Some(Some(img)) = imgs.get_mut(key) else {
+        return;
+    };
+    let id = *img.tex.get_or_insert_with(|| {
+        let id = p.g.add_image(img.w, img.h, &img.rgba);
+        img.rgba = Vec::new(); // sudah di GPU
+        id
+    });
+    p.g.quad(id, r, [0.0, 0.0, 1.0, 1.0], [1.0; 4], 1.0);
+}
+
+/// Berkas gambar lokal `src` (relatif terhadap folder catatan); None = web.
+fn img_path(dir: &Path, src: &str) -> Option<PathBuf> {
     if src.contains("://") && !src.starts_with("file://") {
         return None;
     }
     let p = src.trim_start_matches("file://").replace("%20", " ");
-    let path = if Path::new(&p).is_absolute() {
+    Some(if Path::new(&p).is_absolute() {
         PathBuf::from(p)
     } else {
         dir.join(p)
+    })
+}
+
+/// Diagram sebagai PNG: skala 2x, tema terang, tepi 32 px.
+fn diagram_png(src: &str, kind: DiaKind) -> Result<Vec<u8>, String> {
+    // Font sendiri: kanvas CPU butuh atlas glyph sendiri (lihat `Canvas`).
+    let mut f = Fonts::load()?;
+    let (t, s) = (Theme::new(false), 2.0);
+    let k = match kind {
+        DiaKind::Puml(_) => 2.0,
+        _ => s,
     };
-    let mut img = image::open(path).ok()?;
+    let (v, r) = zoom_view(&mut f, src, kind, None, k, s, &t).ok_or("diagram not recognized")?;
+    let pad = 16.0 * s;
+    let (w, h) = ((r.w + 2.0 * pad).ceil() as usize, (r.h + 2.0 * pad).ceil() as usize);
+    let mut c = crate::puml_render::Canvas::new(w, h, t.bg);
+    let (ox, oy) = (pad - r.x, pad - r.y);
+    for d in &v.decos {
+        match d {
+            Deco::Mesh(_, m) => c.mesh(m, ox, oy),
+            Deco::Fill(q, col) | Deco::Round(q, _, col) => c.rect(ox + q.x, oy + q.y, q.w, q.h, *col),
+            Deco::Img(..) | Deco::Icon(..) => {}
+        }
+    }
+    for (x, y, lay) in &v.items {
+        c.text(&mut f, lay, ox + x, oy + y);
+    }
+    c.png()
+}
+
+/// Simpan ke folder Downloads tanpa menimpa; mengembalikan path-nya.
+#[cfg(not(target_arch = "wasm32"))]
+fn save_download(name: &str, bytes: &[u8]) -> Result<String, String> {
+    let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .ok_or("no home folder")?;
+    let dir = PathBuf::from(home).join("Downloads");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let (stem, ext) = name.rsplit_once('.').unwrap_or((name, "png"));
+    let mut path = dir.join(name);
+    let mut k = 2;
+    while path.exists() {
+        path = dir.join(format!("{stem} ({k}).{ext}"));
+        k += 1;
+    }
+    std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+    Ok(path.display().to_string())
+}
+
+/// Web: unduhan browser (masuk ke folder Downloads).
+#[cfg(target_arch = "wasm32")]
+fn save_download(name: &str, bytes: &[u8]) -> Result<String, String> {
+    crate::web::download(name, bytes);
+    Ok(format!("Downloads/{name}"))
+}
+
+/// Gambar lokal relatif terhadap folder catatan. Gambar web tidak diunduh.
+// ponytail: decode sinkron di thread UI saat mode baca dibangun. Pindahkan ke
+// thread latar (pola decode worker stylegen) bila gambar besar terasa macet.
+fn decode_img(dir: &Path, src: &str) -> Option<Img> {
+    let mut img = image::open(img_path(dir, src)?).ok()?;
     if img.width() > 1600 || img.height() > 1600 {
         img = img.thumbnail(1600, 1600);
     }
@@ -793,6 +875,7 @@ fn build_read(
                         let dh = ih * dw / iw.max(1.0);
                         v.decos
                             .push(Deco::Img(src.clone(), Rect::new(x0, y, dw, dh)));
+                        v.dias.push((Rect::new(x0, y, dw, dh), src.clone(), DiaKind::Image));
                         y += dh;
                     }
                     None => {
@@ -1040,30 +1123,38 @@ fn build_mermaid(
             v.items.push((lx, ly, l));
         }
     }
-    v.dias.push((Rect::new(ox, oy, pl.w, pl.h), src.to_string(), None));
+    v.dias.push((Rect::new(ox, oy, pl.w, pl.h), src.to_string(), DiaKind::Mermaid));
     *y = oy + pl.h + 12.0 * s;
     Some(())
 }
 
-/// Tampilan diagram untuk penampil pada skala `k` (PlantUML: px per unit,
-/// Mermaid: faktor skala UI) + kotaknya.
+/// Tampilan penampil pada skala `k` (PlantUML: px per unit, Mermaid: faktor
+/// skala UI, gambar: px layar per px gambar; `isz` = ukuran gambar) + kotaknya.
+#[allow(clippy::too_many_arguments)]
 fn zoom_view(
     f: &mut Fonts,
     src: &str,
-    idx: Option<usize>,
+    kind: DiaKind,
+    isz: Option<(f32, f32)>,
     k: f32,
     s: f32,
     t: &Theme,
 ) -> Option<(RdView, Rect)> {
     let mut v = RdView::default();
-    match idx {
-        Some(i) => {
+    match kind {
+        DiaKind::Image => {
+            let (w, h) = isz?;
+            let r = Rect::new(0.0, 0.0, w * k, h * k);
+            v.decos.push(Deco::Img(src.to_owned(), r));
+            Some((v, r))
+        }
+        DiaKind::Puml(i) => {
             let dia = crate::plantuml::parse_all(src)?.into_iter().nth(i)?;
             let (lays, pl) = puml_place(f, dia.as_ref(), k);
             puml_emit(&mut v, &lays, &pl, k, 0.0, 0.0, s, t);
             Some((v, Rect::new(0.0, 0.0, pl.w * k, pl.h * k)))
         }
-        None => {
+        DiaKind::Mermaid => {
             build_mermaid(&mut v, f, src, 0.0, &mut 0.0, 0.0, f32::INFINITY, k, t)?;
             let r = v.dias.last()?.0;
             Some((v, r))
@@ -1162,7 +1253,7 @@ fn build_puml(
         let ox = (x0 + ((bw - w) / 2.0).max(((bw - full) / 2.0).min(0.0))).round();
         let oy = (*y + 24.0 * s).round();
         puml_emit(v, &lays, &pl, k, ox, oy, s, t);
-        v.dias.push((Rect::new(ox, oy, w, h), src.to_string(), Some(idx)));
+        v.dias.push((Rect::new(ox, oy, w, h), src.to_string(), DiaKind::Puml(idx)));
         *y = oy + h + 12.0 * s;
     }
     Some(())
@@ -1422,6 +1513,21 @@ impl P<'_> {
 #[cfg(not(any(target_os = "android", target_arch = "wasm32")))]
 fn clip_get() -> Option<String> {
     arboard::Clipboard::new().ok()?.get_text().ok()
+}
+
+/// Gambar di clipboard sebagai PNG (screenshot, "Copy image").
+#[cfg(not(any(target_os = "android", target_arch = "wasm32")))]
+fn clip_image_png() -> Option<Vec<u8>> {
+    let img = arboard::Clipboard::new().ok()?.get_image().ok()?;
+    let rgba = image::RgbaImage::from_raw(img.width as u32, img.height as u32, img.bytes.into_owned())?;
+    let mut png = std::io::Cursor::new(Vec::new());
+    rgba.write_to(&mut png, image::ImageFormat::Png).ok()?;
+    Some(png.into_inner())
+}
+
+#[cfg(any(target_os = "android", target_arch = "wasm32"))]
+fn clip_image_png() -> Option<Vec<u8>> {
+    None
 }
 
 #[cfg(not(any(target_os = "android", target_arch = "wasm32")))]
@@ -1807,6 +1913,36 @@ impl App {
         }
     }
 
+    /// Simpan gambar ke `assets/` folder catatan lalu sisipkan tautannya.
+    fn add_image(&mut self, name: &str, bytes: &[u8]) {
+        match self.store.add_asset(name, bytes) {
+            Ok(rel) => {
+                let md = format!("![]({rel})\n");
+                if self.mode == Mode::Edit {
+                    let c = self.doc.cursor;
+                    let nl = if c == 0 || self.doc.text[..c].ends_with('\n') { "" } else { "\n" };
+                    self.doc.insert(&format!("{nl}{md}"));
+                    self.reveal();
+                } else {
+                    // Mode baca: di akhir catatan.
+                    let end = self.doc.text.len();
+                    let nl = if end == 0 || self.doc.text.ends_with('\n') { "" } else { "\n" };
+                    self.doc.replace_range(end, end, &format!("{nl}{md}"));
+                }
+                self.changed();
+            }
+            Err(e) => self.status = format!("Couldn't add image: {e}"),
+        }
+    }
+
+    fn paste_image(&mut self) -> bool {
+        let Some(png) = clip_image_png() else {
+            return false;
+        };
+        self.add_image("pasted.png", &png);
+        true
+    }
+
     fn delete_note(&mut self) {
         if let Err(e) = self.store.trash(self.cur) {
             self.status = format!("Couldn't delete: {e}");
@@ -2087,8 +2223,9 @@ impl App {
             return self.base_hits();
         }
         {
-            for (i, b) in [Btn::ZoomOut, Btn::ZoomIn, Btn::ZoomClose].into_iter().enumerate() {
-                v.push((r(w - (16.0 + 36.0 + (2 - i) as f32 * 44.0) * s, 16.0 * s, 36.0, 36.0), b));
+            let bs = [Btn::ZoomSave, Btn::ZoomOut, Btn::ZoomIn, Btn::ZoomClose];
+            for (i, b) in bs.into_iter().enumerate() {
+                v.push((r(w - (16.0 + 36.0 + (3 - i) as f32 * 44.0) * s, 16.0 * s, 36.0, 36.0), b));
             }
         }
         v
@@ -2244,6 +2381,7 @@ impl App {
             Btn::Delete => self.delete_note(),
             Btn::ZoomOut => self.zoom_by(1.0 / 1.2, cx, cy),
             Btn::ZoomIn => self.zoom_by(1.2, cx, cy),
+            Btn::ZoomSave => self.download_view(),
             Btn::ZoomClose => {
                 self.zoom = None;
                 self.set_icon(CursorIcon::Default);
@@ -2549,6 +2687,10 @@ impl App {
         );
         if let (true, Key::Character(c)) = (ctrl, &ev.logical_key) {
             match c.to_lowercase().as_str() {
+                // Clipboard tanpa teks tapi berisi gambar: simpan lalu tautkan.
+                "v" if self.focus == Focus::Editor
+                    && clip_get().is_none_or(|t| t.is_empty())
+                    && self.paste_image() => {}
                 "n" => self.new_note(""),
                 "f" | "l" => self.open_search(),
                 "\\" => self.click(Btn::Side),
@@ -3040,12 +3182,12 @@ impl App {
 
     /// Buka diagram ke-`i` mode baca di penampil layar penuh.
     fn open_viewer(&mut self, i: usize) {
-        let Some((_, src, idx)) = self.rd.dias.get(i) else {
+        let Some((_, src, kind)) = self.rd.dias.get(i) else {
             return;
         };
         self.zoom = Some(Zoom {
             src: src.clone(),
-            idx: *idx,
+            kind: *kind,
             k: 0.0,
             built: -1.0,
             pan: (0.0, 0.0),
@@ -3053,10 +3195,43 @@ impl App {
             view: RdView::default(),
             org: (0.0, 0.0),
             touches: Vec::new(),
+            msg: None,
         });
         self.rd.sel = None;
         self.set_icon(CursorIcon::Grab);
         self.redraw();
+    }
+
+    /// Download di penampil: berkas gambar asli, atau diagram dirender ulang
+    /// 2x di atas putih.
+    fn download_view(&mut self) {
+        let Some(z) = &self.zoom else { return };
+        let (src, kind) = (z.src.clone(), z.kind);
+        let r = match kind {
+            DiaKind::Image => img_path(&self.store.dir, &src)
+                .ok_or_else(|| "not a local image".to_owned())
+                .and_then(|p| {
+                    let b = std::fs::read(&p).map_err(|e| e.to_string())?;
+                    let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("image.png");
+                    Ok((name.to_owned(), b))
+                }),
+            _ => {
+                let title: String = store::title_of(&self.doc.text)
+                    .chars()
+                    .map(|c| if c.is_alphanumeric() || c == '-' { c } else { ' ' })
+                    .collect();
+                let title = title.split_whitespace().collect::<Vec<_>>().join("-");
+                let name = if title.is_empty() { "diagram.png".into() } else { format!("{title}-diagram.png") };
+                diagram_png(&src, kind).map(|b| (name, b))
+            }
+        };
+        let msg = match r.and_then(|(name, b)| save_download(&name, &b)) {
+            Ok(path) => format!("Saved to {path}"),
+            Err(e) => format!("Couldn't download: {e}"),
+        };
+        if let Some(z) = &mut self.zoom {
+            z.msg = Some(msg);
+        }
     }
 
     /// Sentuhan di penampil: 1 jari geser, 2 jari pinch (zoom + geser).
@@ -3815,10 +3990,18 @@ impl App {
         let (t, s) = (self.theme, self.s);
         let (w, h) = self.size;
         let Some(z) = &mut self.zoom else { return };
+        let isz = match self.imgs.get(&z.src) {
+            Some(Some(i)) => Some((i.w as f32, i.h as f32)),
+            _ => None,
+        };
         if z.k <= 0.0 {
             // Pas layar (maks. 2x ukuran baca), di tengah.
-            let k0 = if z.idx.is_some() { BODY * s * 0.9 / 12.0 } else { s };
-            let Some((_, r)) = zoom_view(p.f, &z.src, z.idx, k0, s, &t) else {
+            let k0 = match z.kind {
+                DiaKind::Puml(_) => BODY * s * 0.9 / 12.0,
+                DiaKind::Mermaid => s,
+                DiaKind::Image => 1.0,
+            };
+            let Some((_, r)) = zoom_view(p.f, &z.src, z.kind, isz, k0, s, &t) else {
                 self.zoom = None;
                 return;
             };
@@ -3828,7 +4011,7 @@ impl App {
             z.pan = ((w - r.w * q) / 2.0, (h - r.h * q) / 2.0);
         }
         if z.built != z.k {
-            let Some((v, r)) = zoom_view(p.f, &z.src, z.idx, z.k, s, &t) else {
+            let Some((v, r)) = zoom_view(p.f, &z.src, z.kind, isz, z.k, s, &t) else {
                 self.zoom = None;
                 return;
             };
@@ -3839,7 +4022,8 @@ impl App {
             match d {
                 Deco::Mesh(_, m) => p.g.tris(m, ox, oy),
                 Deco::Fill(r, c) => p.rect(Rect::new(ox + r.x, oy + r.y, r.w, r.h), *c),
-                Deco::Img(..) | Deco::Round(..) | Deco::Icon(..) => {}
+                Deco::Img(key, r) => img_quad(p, &mut self.imgs, key, Rect::new(ox + r.x, oy + r.y, r.w, r.h)),
+                Deco::Round(..) | Deco::Icon(..) => {}
             }
         }
         for (x, y, lay) in &z.view.items {
@@ -3851,6 +4035,7 @@ impl App {
             p.rrect(r, 6.0 * s, if hot { t.side } else { t.bg });
             p.rframe(r, 6.0 * s, lw, if hot { t.dim } else { t.border });
             let name = match b {
+                Btn::ZoomSave => "download",
                 Btn::ZoomOut => "minus",
                 Btn::ZoomIn => "plus",
                 _ => "x",
@@ -3858,7 +4043,8 @@ impl App {
             p.icon_in(name, r, 18.0 * s, t.fg);
         }
         let px = 12.0 * s;
-        let hint = "Scroll/pinch: zoom · Drag: pan · 0: fit · Esc: close";
+        let hint = self.zoom.as_ref().and_then(|z| z.msg.clone());
+        let hint = hint.as_deref().unwrap_or("Scroll/pinch: zoom · Drag: pan · 0: fit · Esc: close");
         let tw = p.f.width(Face::Regular, px, hint);
         let (pw, ph) = ((tw + 48.0 * s).round(), (30.0 * s).round());
         let r = Rect::new(((w - pw) / 2.0).round(), (h - 24.0 * s - ph).round(), pw, ph);
@@ -3890,24 +4076,7 @@ impl App {
                 Deco::Icon(name, r, col) if visible(r) => p.icon(name, ox + r.x, oy + r.y, r.w, *col),
                 Deco::Mesh(r, m) if visible(r) => p.g.tris(m, ox, oy),
                 Deco::Img(key, r) if visible(r) => {
-                    if let Some(Some(img)) = self.imgs.get_mut(key) {
-                        let id = match img.tex {
-                            Some(id) => id,
-                            None => {
-                                let id = p.g.add_image(img.w, img.h, &img.rgba);
-                                img.rgba = Vec::new(); // sudah di GPU
-                                img.tex = Some(id);
-                                id
-                            }
-                        };
-                        p.g.quad(
-                            id,
-                            Rect::new(ox + r.x, oy + r.y, r.w, r.h),
-                            [0.0, 0.0, 1.0, 1.0],
-                            [1.0; 4],
-                            1.0,
-                        );
-                    }
+                    img_quad(p, &mut self.imgs, key, Rect::new(ox + r.x, oy + r.y, r.w, r.h))
                 }
                 _ => {}
             }
@@ -4137,7 +4306,43 @@ impl ApplicationHandler<Ev> for App {
                 self.zoom_by((1.0 + delta as f32).max(0.1), x, y);
             }
             WindowEvent::RedrawRequested => self.render(),
+            // Seret berkas gambar ke jendela: salin ke `assets/` dan tautkan.
+            WindowEvent::DroppedFile(path) => {
+                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+                if ["png", "jpg", "jpeg", "gif", "webp"].contains(&ext.as_str()) {
+                    match std::fs::read(&path) {
+                        Ok(b) => {
+                            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("image");
+                            self.add_image(name, &b);
+                        }
+                        Err(e) => self.status = format!("Couldn't add image: {e}"),
+                    }
+                    self.redraw();
+                }
+            }
             _ => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Download diagram: PlantUML dan Mermaid jadi PNG yang bisa dibaca lagi.
+    #[test]
+    fn diagram_download_png() {
+        let cases = [
+            ("@startuml\nAlice -> Bob: hello\n@enduml\n", DiaKind::Puml(0)),
+            ("flowchart TD\n  A[Type a note] --> B{Changed?}\n  B -- yes --> C[Save]\n", DiaKind::Mermaid),
+        ];
+        for (i, (src, kind)) in cases.into_iter().enumerate() {
+            let png = diagram_png(src, kind).unwrap();
+            let img = image::load_from_memory(&png).unwrap();
+            assert!(img.width() > 100 && img.height() > 100, "{}x{}", img.width(), img.height());
+            if let Some(dir) = std::env::var_os("TILDOWN_TEST_OUT") {
+                std::fs::write(PathBuf::from(dir).join(format!("dl{i}.png")), &png).unwrap();
+            }
         }
     }
 }
