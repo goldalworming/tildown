@@ -4455,6 +4455,13 @@ impl ApplicationHandler<Ev> for App {
                         Err(e) => self.status = format!("Couldn't add image: {e}"),
                     }
                     self.redraw();
+                } else if ["md", "markdown", "txt"].contains(&ext.as_str()) {
+                    // Berkas markdown → catatan baru (aslinya tidak diubah).
+                    match std::fs::read_to_string(&path) {
+                        Ok(t) => self.new_note(&t.trim_start_matches('\u{feff}').replace("\r\n", "\n")),
+                        Err(e) => self.status = format!("Couldn't import note: {e}"),
+                    }
+                    self.redraw();
                 }
             }
             _ => {}
