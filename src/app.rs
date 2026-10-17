@@ -54,7 +54,8 @@ const SYNC_POLL: Duration = Duration::from_secs(60);
 pub enum Ev {
     Gpu(Gpu),
     Sync(Result<String, String>),
-    /// Keyboard layar (web): 1 = preedit, 2 = teks, 3 = Enter, 4 = Backspace.
+    /// Keyboard layar (web): 1 = preedit, 2 = teks, 3 = Enter, 4 = Backspace;
+    /// 5 = isi berkas markdown yang di-drop.
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     Kb(u8, String),
 }
@@ -1934,6 +1935,12 @@ impl App {
             self.saved_ver = u64::MAX; // belum di disk: paksa simpan
             self.changed();
         }
+    }
+
+    /// Berkas markdown yang di-drop → catatan baru (aslinya tidak diubah).
+    fn import_note(&mut self, text: &str) {
+        self.new_note(&text.trim_start_matches('\u{feff}').replace("\r\n", "\n"));
+        self.redraw();
     }
 
     /// Simpan gambar ke `assets/` folder catatan lalu sisipkan tautannya.
@@ -4328,6 +4335,7 @@ impl ApplicationHandler<Ev> for App {
         let mut g = match ev {
             Ev::Gpu(g) => g,
             Ev::Sync(r) => return self.sync_done(r),
+            Ev::Kb(5, s) => return self.import_note(&s),
             Ev::Kb(k, s) => return self.soft_key(k, s),
         };
         // `Resized` yang datang selama GPU disiapkan (web) tidak sampai ke surface.
@@ -4456,12 +4464,13 @@ impl ApplicationHandler<Ev> for App {
                     }
                     self.redraw();
                 } else if ["md", "markdown", "txt"].contains(&ext.as_str()) {
-                    // Berkas markdown → catatan baru (aslinya tidak diubah).
                     match std::fs::read_to_string(&path) {
-                        Ok(t) => self.new_note(&t.trim_start_matches('\u{feff}').replace("\r\n", "\n")),
-                        Err(e) => self.status = format!("Couldn't import note: {e}"),
+                        Ok(t) => self.import_note(&t),
+                        Err(e) => {
+                            self.status = format!("Couldn't import note: {e}");
+                            self.redraw();
+                        }
                     }
-                    self.redraw();
                 }
             }
             _ => {}

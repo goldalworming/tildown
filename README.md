@@ -23,7 +23,7 @@ Built from scratch in Rust on **wgpu + winit**. One codebase runs on desktop and
   - **PlantUML**: sequence, activity, class, object, use case, component, state, mindmap, WBS, gantt, timing, JSON, YAML, nwdiag, salt, EBNF, regex, Chen ER, chart, git, wire, ditaa and more.
   - Click a diagram or an image to open a viewer with zoom, pan and pinch. **Download** saves the image, or the diagram as a PNG, to your Downloads folder.
 - **Images**: paste a screenshot (Ctrl+V) or drop image files onto the window. They are saved to `assets/` in your notes folder and linked into the note. This works in the desktop app only, and images are not synced yet.
-- **Import**: drop `.md` or `.txt` files onto the window to add each one as a new note. The original file is left unchanged (desktop app only).
+- **Import**: drop `.md` or `.txt` files onto the window to add each one as a new note. The original file is left unchanged. Works in the desktop app and on the web.
 - **Sync** across devices through your own Cloudflare Worker on the free plan, so your notes never pass through anyone else's server. See [Sync](#sync).
 - **Trash**: deleted notes can be restored for 30 days.
 - **Settings**: light, dark or system theme, text size, line width, and whether notes open in edit or read mode.

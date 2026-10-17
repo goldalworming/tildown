@@ -82,6 +82,13 @@ export function kb_init(cb) {
   document.addEventListener('pointerup', (e) => {
     if (e.pointerType !== 'mouse' && kbOn) kb.focus({ preventScroll: true });
   }, true);
+  // Drop berkas .md/.txt → catatan baru (jenis 5).
+  document.addEventListener('dragover', e => e.preventDefault());
+  document.addEventListener('drop', async e => {
+    e.preventDefault();
+    for (const f of e.dataTransfer.files)
+      if (/\.(md|markdown|txt)$/i.test(f.name)) cb(5, await f.text());
+  });
 }
 export function kb_editing(on) {
   kbOn = on;
@@ -119,7 +126,8 @@ extern "C" {
 }
 
 /// Pasang keyboard layar; `f(jenis, teks)` dipanggil untuk tiap ketikan
-/// (1 = preedit, 2 = teks, 3 = Enter, 4 = Backspace).
+/// (1 = preedit, 2 = teks, 3 = Enter, 4 = Backspace), juga isi berkas
+/// yang di-drop (5).
 pub fn kb_init(f: impl FnMut(u8, String) + 'static) {
     let c = Closure::<dyn FnMut(u8, String)>::new(f);
     kb_init_js(&c);
