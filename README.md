@@ -80,3 +80,7 @@ docs/PRD.md     product requirements (Indonesian)
 
 - Fonts: [IBM Plex](https://github.com/IBM/plex) and [Noto Sans](https://fonts.google.com/noto), both under the SIL Open Font License.
 - Icons: [Lucide](https://lucide.dev) (ISC).
+
+## License
+
+[MIT](LICENSE). Bundled fonts and icons keep their own licenses (see Credits).

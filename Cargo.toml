@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "TilDown (Tilde + markdown): catatan markdown ringan, wgpu + winit"
 repository = "https://github.com/goldalworming/tildown"
+license = "MIT"
 
 # Logika aplikasi di lib supaya target Android (cdylib + android_main) dan web
 # (wasm) nanti tinggal menambah entry point, bukan memindahkan kode.
