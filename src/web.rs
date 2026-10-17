@@ -24,10 +24,15 @@ export async function opfs_load() {
   const t = await dir.getDirectoryHandle('.trash', { create: true });
   for await (const [name, h] of t.entries())
     if (h.kind === 'file') { const f = await h.getFile(); out.push('.trash/' + name, await f.text(), f.lastModified); }
+  // Gambar: hanya nama; isinya dibaca saat pertama tampil (`opfs_read_asset`).
   const a = await dir.getDirectoryHandle('assets', { create: true });
   for await (const [name, h] of a.entries())
-    if (h.kind === 'file') { const f = await h.getFile(); out.push('assets/' + name, new Uint8Array(await f.arrayBuffer()), f.lastModified); }
+    if (h.kind === 'file') out.push('assets/' + name, null, 0);
   return out;
+}
+export async function opfs_read_asset(name) {
+  const f = await (await (await dir.getDirectoryHandle('assets')).getFileHandle(name)).getFile();
+  return new Uint8Array(await f.arrayBuffer());
 }
 const put = async (d, name, text) => {
   const w = await (await d.getFileHandle(name, { create: true })).createWritable();
@@ -139,6 +144,8 @@ extern "C" {
     async fn opfs_load() -> Result<JsValue, JsValue>;
     fn opfs_write(name: &str, text: &str);
     fn opfs_asset(name: &str, bytes: &[u8]);
+    #[wasm_bindgen(catch)]
+    async fn opfs_read_asset(name: &str) -> Result<JsValue, JsValue>;
     fn opfs_trash(name: &str, dst: &str, text: &str);
     fn opfs_untrash(name: &str, to: &str, text: &str);
     fn opfs_purge(name: &str);
@@ -183,8 +190,15 @@ pub async fn http_post(url: &str, token: &str, body: &str) -> Result<(u16, Strin
 
 thread_local! {
     static FILES: RefCell<HashMap<String, (String, SystemTime)>> = RefCell::new(HashMap::new());
-    /// Gambar di `assets/`, kunci `assets/<nama>`.
-    static ASSETS: RefCell<HashMap<String, Vec<u8>>> = RefCell::new(HashMap::new());
+    /// Gambar di `assets/`, kunci `assets/<nama>`; `None` = belum dibaca.
+    static ASSETS: RefCell<HashMap<String, Option<Vec<u8>>>> = RefCell::new(HashMap::new());
+    static LOADING: RefCell<std::collections::HashSet<String>> = RefCell::default();
+    static ON_ASSET: RefCell<Option<Box<dyn Fn(String)>>> = RefCell::new(None);
+}
+
+/// `f(nama)` dipanggil saat isi gambar selesai dibaca dari OPFS.
+pub fn on_asset(f: impl Fn(String) + 'static) {
+    ON_ASSET.set(Some(Box::new(f)));
 }
 
 /// Muat semua berkas OPFS ke cermin. Dipanggil sekali sebelum `Store::open`.
@@ -194,8 +208,7 @@ pub async fn preload() -> Result<(), String> {
     FILES.with_borrow_mut(|m| {
         for k in (0..a.length()).step_by(3) {
             if let Some(name) = a.get(k).as_string().filter(|n| n.starts_with("assets/")) {
-                let b = js_sys::Uint8Array::new(&a.get(k + 1)).to_vec();
-                ASSETS.with_borrow_mut(|m| m.insert(name, b));
+                ASSETS.with_borrow_mut(|m| m.insert(name, None));
                 continue;
             }
             let (Some(name), Some(text), Some(ms)) = (
@@ -234,15 +247,32 @@ pub fn exists(_: &Path, name: &str) -> bool {
     FILES.with_borrow(|m| m.contains_key(name)) || ASSETS.with_borrow(|m| m.contains_key(name))
 }
 
+/// Isi gambar kalau sudah dibaca; kalau belum, baca di latar lalu `on_asset`.
 pub fn read_bytes(_: &Path, name: &str) -> Option<Vec<u8>> {
-    ASSETS.with_borrow(|m| m.get(name).cloned())
+    match ASSETS.with_borrow(|m| m.get(name).cloned())? {
+        Some(b) => Some(b),
+        None => {
+            if LOADING.with_borrow_mut(|s| s.insert(name.to_owned())) {
+                let name = name.to_owned();
+                wasm_bindgen_futures::spawn_local(async move {
+                    // Gagal: tetap di LOADING supaya tidak dicoba terus tiap layout.
+                    let Ok(v) = opfs_read_asset(&name["assets/".len()..]).await else { return };
+                    let b = js_sys::Uint8Array::new(&v).to_vec();
+                    ASSETS.with_borrow_mut(|m| m.insert(name.clone(), Some(b)));
+                    LOADING.with_borrow_mut(|s| s.remove(&name));
+                    ON_ASSET.with_borrow(|f| f.as_ref().map(|f| f(name)));
+                });
+            }
+            None
+        }
+    }
 }
 
 /// Hanya untuk `assets/<nama>`.
 pub fn write_bytes(_: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
     let file = name.strip_prefix("assets/").ok_or(io::ErrorKind::InvalidInput)?;
     opfs_asset(file, bytes);
-    ASSETS.with_borrow_mut(|m| m.insert(name.to_owned(), bytes.to_vec()));
+    ASSETS.with_borrow_mut(|m| m.insert(name.to_owned(), Some(bytes.to_vec())));
     Ok(())
 }
 

@@ -61,6 +61,9 @@ pub enum Ev {
     /// Gambar yang ditempel atau di-drop (web): nama, isi.
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     Img(String, Vec<u8>),
+    /// Isi gambar `assets/…` selesai dibaca (web, lazy).
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    Asset(String),
 }
 
 /// Sentuhan satu jari di luar penampil: tap = klik, geser = gulir.
@@ -1792,6 +1795,8 @@ pub fn run() -> Result<(), String> {
             crate::web::kb_init(move |k, s| _ = kb.send_event(Ev::Kb(k, s)));
             let im = proxy.clone();
             crate::web::img_init(move |n, b| _ = im.send_event(Ev::Img(n, b)));
+            let ld = proxy.clone();
+            crate::web::on_asset(move |n| _ = ld.send_event(Ev::Asset(n)));
             app.proxy = Some(proxy);
             el.spawn_app(app);
             Ok::<_, String>(())
@@ -4375,6 +4380,12 @@ impl ApplicationHandler<Ev> for App {
             Ev::Sync(r) => return self.sync_done(r),
             Ev::Kb(5, s) => return self.import_note(&s),
             Ev::Kb(6, s) => return self.paste_text(s),
+            Ev::Asset(name) => {
+                // Gambar tadi dilewati (belum terbaca): decode ulang dan susun lagi.
+                self.imgs.retain(|k, v| v.is_some() || k.trim_start_matches("./") != name);
+                self.rd = RdView::default();
+                return self.redraw();
+            }
             Ev::Img(n, b) => {
                 self.add_image(&n, &b);
                 return self.redraw();
