@@ -1,0 +1,41 @@
+[package]
+name = "tildown"
+version = "0.1.0"
+edition = "2021"
+description = "TilDown (Tilde + markdown): catatan markdown ringan, wgpu + winit"
+repository = "https://github.com/goldalworming/tildown"
+
+# Logika aplikasi di lib supaya target Android (cdylib + android_main) dan web
+# (wasm) nanti tinggal menambah entry point, bukan memindahkan kode.
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "tildown"
+path = "src/main.rs"
+
+[dependencies]
+wgpu = { version = "30.0.0", features = ["webgl"] }   # versi sama dengan brosql; webgl = cadangan WebGL2 di web
+winit = "0.30"      # satu shell untuk Windows, macOS, Android dan web
+pollster = "0.4"    # block_on saat init device
+bytemuck = { version = "1", features = ["derive"] }
+ab_glyph = "0.2"   # rasterizer portabel; outline dibaca saat dibutuhkan (fontdue memuat semua glyph: +59 MB)
+pulldown-cmark = { version = "0.13", default-features = false }   # mode baca
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+web-time = "1"     # Instant/SystemTime yang juga jalan di wasm (re-export std di native)
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+
+[target.'cfg(not(any(target_os = "android", target_arch = "wasm32")))'.dependencies]
+arboard = { version = "3", default-features = false }   # clipboard desktop
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+opt-level = 2
+lto = "thin"
+strip = true

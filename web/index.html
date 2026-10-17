@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TilDown</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #fff; }
+  @media (prefers-color-scheme: dark) { html, body { background: #1e1e1e; } }
+  canvas { display: block; width: 100vw; height: 100vh; outline: none; touch-action: none; }
+</style>
+</head>
+<body>
+<script type="module">
+  import init from './pkg/tildown.js';
+  await init();
+  // Kanvas dibuat winit; beri fokus supaya bisa langsung mengetik (S1).
+  const focus = () => document.querySelector('canvas')?.focus();
+  new MutationObserver(focus).observe(document.body, { childList: true });
+</script>
+</body>
+</html>
