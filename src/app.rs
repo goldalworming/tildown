@@ -54,6 +54,17 @@ const SYNC_POLL: Duration = Duration::from_secs(60);
 pub enum Ev {
     Gpu(Gpu),
     Sync(Result<String, String>),
+    /// Keyboard layar (web): 1 = preedit, 2 = teks, 3 = Enter, 4 = Backspace.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    Kb(u8, String),
+}
+
+/// Sentuhan satu jari di luar penampil: tap = klik, geser = gulir.
+struct Tap {
+    id: u64,
+    start: (f32, f32),
+    last: (f32, f32),
+    moved: bool,
 }
 
 /// Ukuran heading editor relatif terhadap isi (# 24, ## 20, ### 18).
@@ -1712,6 +1723,9 @@ pub struct App {
     /// Petunjuk sesudah Generate (menggantikan status sementara).
     sync_msg: Option<&'static str>,
     focused: bool,
+    tap: Option<Tap>,
+    /// Keyboard layar sedang dibutuhkan (web; lihat `kb_wanted`).
+    kb_on: bool,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1744,7 +1758,10 @@ pub fn run() -> Result<(), String> {
             let el = EventLoop::with_user_event()
                 .build()
                 .map_err(|e| e.to_string())?;
-            app.proxy = Some(el.create_proxy());
+            let proxy = el.create_proxy();
+            let kb = proxy.clone();
+            crate::web::kb_init(move |k, s| _ = kb.send_event(Ev::Kb(k, s)));
+            app.proxy = Some(proxy);
             el.spawn_app(app);
             Ok::<_, String>(())
         };
@@ -1835,6 +1852,8 @@ impl App {
             sync_edit: None,
             sync_msg: None,
             focused: true,
+            tap: None,
+            kb_on: false,
             sync,
         };
         app.load(cur);
@@ -1900,6 +1919,10 @@ impl App {
         }
         self.load(i);
         self.refilter();
+        // HP: daftar menutupi layar; catatan yang dibuka harus kelihatan.
+        if self.size.0 > 1.0 && self.narrow() {
+            self.side_open = false;
+        }
     }
 
     fn new_note(&mut self, text: &str) {
@@ -2152,10 +2175,12 @@ impl App {
     fn geo(&self) -> Geo {
         let s = self.s;
         let (w, h) = self.size;
-        let sw = if self.side_open {
-            (SIDE_W * s).min(w * 0.45).round()
-        } else {
+        let sw = if !self.side_open {
             0.0
+        } else if self.narrow() {
+            w // HP: daftar menutupi layar, catatan dibuka dari situ
+        } else {
+            (SIDE_W * s).min(w * 0.45).round()
         };
         let bh = (BAR_H * s).round();
         let fh = if self.query().is_empty() { 0.0 } else { (40.0 * s).round() };
@@ -2250,6 +2275,9 @@ impl App {
             }
             v.push((r(8.0 * s, h - 44.0 * s, SIDE_W - 16.0, 36.0), Btn::Settings));
         }
+        if self.side_open && self.narrow() {
+            return v; // isi tertutup daftar: tanpa toolbar
+        }
         v.push((r(geo.bar.x + 8.0 * s, 8.0 * s, 32.0, 32.0), Btn::Side));
         if !self.query().is_empty() {
             let y = geo.content.y + geo.content.h + 4.0 * s;
@@ -2266,6 +2294,11 @@ impl App {
             x -= 4.0 * s;
         }
         v
+    }
+
+    /// Layar selebar HP (< 640 px CSS).
+    fn narrow(&self) -> bool {
+        self.size.0 < 640.0 * self.s
     }
 
     fn mode_label(&self) -> &'static str {
@@ -2722,23 +2755,76 @@ impl App {
         self.reveal();
     }
 
+    fn search_enter(&mut self) {
+        let q = self.search.text.trim().to_owned();
+        // Hanya hasil persis yang dibuka Enter: judul baru yang kebetulan
+        // mirip catatan lain tetap jadi catatan baru (pola NV).
+        if !q.is_empty() {
+            match self.res.first().filter(|_| self.exact > 0) {
+                Some(&i) => self.open_note(i),
+                None => {
+                    self.search = Doc::default();
+                    self.new_note(&format!("{q}\n"));
+                }
+            }
+        }
+        self.focus = Focus::Editor;
+    }
+
+    /// Keyboard layar (web): teks/preedit lewat jalur IME, Enter dan Backspace
+    /// ke isian yang aktif.
+    fn soft_key(&mut self, k: u8, text: String) {
+        match k {
+            1 => self.ime(Ime::Preedit(text, None)),
+            2 => {
+                self.preedit.clear();
+                if !text.is_empty() {
+                    self.ime(Ime::Commit(text));
+                }
+            }
+            3 | 4 => {
+                let enter = k == 3;
+                if self.settings.is_some() {
+                    match self.sync_edit.filter(|_| self.settings == Some(2)) {
+                        Some(_) if enter => self.sync_connect(),
+                        Some(i) => _ = self.sync_in[i].backspace(),
+                        None => {}
+                    }
+                } else if self.focus == Focus::Search {
+                    if enter {
+                        self.search_enter();
+                    } else {
+                        self.search.backspace();
+                        self.refilter();
+                    }
+                } else if self.mode == Mode::Edit {
+                    if enter {
+                        self.enter();
+                    } else {
+                        self.doc.backspace();
+                    }
+                    self.want_x = None;
+                    self.changed();
+                    self.reveal();
+                }
+            }
+            _ => {}
+        }
+        self.redraw();
+    }
+
+    /// Ada isian teks yang aktif: keyboard layar boleh muncul saat diketuk.
+    fn kb_wanted(&self) -> bool {
+        if self.settings.is_some() {
+            self.settings == Some(2) && self.sync_edit.is_some()
+        } else {
+            self.zoom.is_none() && (self.focus == Focus::Search || self.mode == Mode::Edit)
+        }
+    }
+
     fn key_search(&mut self, ev: &KeyEvent, ctrl: bool, shift: bool) {
         match &ev.logical_key {
-            Key::Named(NamedKey::Enter) => {
-                let q = self.search.text.trim().to_owned();
-                // Hanya hasil persis yang dibuka Enter: judul baru yang kebetulan
-                // mirip catatan lain tetap jadi catatan baru (pola NV).
-                if !q.is_empty() {
-                    match self.res.first().filter(|_| self.exact > 0) {
-                        Some(&i) => self.open_note(i),
-                        None => {
-                            self.search = Doc::default();
-                            self.new_note(&format!("{q}\n"));
-                        }
-                    }
-                }
-                self.focus = Focus::Editor;
-            }
+            Key::Named(NamedKey::Enter) => self.search_enter(),
             Key::Named(NamedKey::Escape) => self.close_search(),
             Key::Named(k @ (NamedKey::ArrowDown | NamedKey::ArrowUp)) => {
                 let k = match (self.res.iter().position(|&i| i == self.cur), k) {
@@ -2973,6 +3059,9 @@ impl App {
                     self.reveal_match();
                 }
                 self.focus = Focus::Editor;
+                if self.narrow() {
+                    self.side_open = false;
+                }
             }
         } else if geo.content.contains(x, y) {
             self.focus = Focus::Editor;
@@ -3202,6 +3291,39 @@ impl App {
         self.redraw();
     }
 
+    /// Satu jari: diam lalu lepas = klik di situ; bergeser > 10 px = gulir
+    /// daftar/isi di bawah titik awal (jari ke bawah = isi ikut turun).
+    fn touch_ui(&mut self, id: u64, phase: TouchPhase, pos: (f32, f32)) {
+        match phase {
+            TouchPhase::Started if self.tap.is_none() => {
+                self.tap = Some(Tap { id, start: pos, last: pos, moved: false });
+            }
+            TouchPhase::Moved => {
+                let slop = 10.0 * self.s;
+                let Some(tp) = self.tap.as_mut().filter(|tp| tp.id == id) else {
+                    return;
+                };
+                tp.moved |= (pos.0 - tp.start.0).hypot(pos.1 - tp.start.1) > slop;
+                let (d, start, moved) = ((pos.0 - tp.last.0, pos.1 - tp.last.1), tp.start, tp.moved);
+                tp.last = pos;
+                if moved {
+                    self.mouse = start;
+                    self.wheel(MouseScrollDelta::PixelDelta(PhysicalPosition::new(d.0 as f64, d.1 as f64)));
+                }
+            }
+            TouchPhase::Ended if self.tap.as_ref().is_some_and(|tp| tp.id == id) => {
+                if !self.tap.take().is_some_and(|tp| tp.moved) {
+                    self.mouse_move(pos.0, pos.1);
+                    self.press();
+                    self.release();
+                }
+                self.redraw();
+            }
+            TouchPhase::Cancelled => self.tap = None,
+            _ => {}
+        }
+    }
+
     /// Download di penampil: berkas gambar asli, atau diagram dirender ulang
     /// 2x di atas putih.
     fn download_view(&mut self) {
@@ -3237,6 +3359,11 @@ impl App {
     /// Sentuhan di penampil: 1 jari geser, 2 jari pinch (zoom + geser).
     fn touch(&mut self, t: Touch) {
         let pos = (t.location.x as f32, t.location.y as f32);
+        // Desktop: Windows juga mengirim klik tiruan untuk sentuhan, jadi
+        // tap/gulir sendiri hanya di web.
+        if self.zoom.is_none() && cfg!(target_arch = "wasm32") {
+            return self.touch_ui(t.id, t.phase, pos);
+        }
         if t.phase == TouchPhase::Started
             && self.zoom.as_ref().is_some_and(|z| z.touches.is_empty())
         {
@@ -3302,6 +3429,9 @@ impl App {
                 self.s,
             )
         } else {
+            if self.side_open && self.narrow() {
+                return None; // isi tertutup daftar
+            }
             let h = if self.mode == Mode::Edit {
                 self.ed.h
             } else {
@@ -4198,6 +4328,7 @@ impl ApplicationHandler<Ev> for App {
         let mut g = match ev {
             Ev::Gpu(g) => g,
             Ev::Sync(r) => return self.sync_done(r),
+            Ev::Kb(k, s) => return self.soft_key(k, s),
         };
         // `Resized` yang datang selama GPU disiapkan (web) tidak sampai ke surface.
         if let Some(w) = &self.window {
@@ -4232,6 +4363,12 @@ impl ApplicationHandler<Ev> for App {
     }
 
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+        let kb = self.kb_wanted();
+        if kb != self.kb_on {
+            self.kb_on = kb;
+            #[cfg(target_arch = "wasm32")]
+            crate::web::kb_editing(kb);
+        }
         if self.save_due.is_some_and(|t| Instant::now() >= t) {
             self.save_now();
             self.redraw();

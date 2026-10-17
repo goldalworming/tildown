@@ -2,16 +2,26 @@
 <html lang="id">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
 <title>TilDown</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#16181b" media="(prefers-color-scheme: dark)">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="TilDown">
 <style>
   html, body { margin: 0; height: 100%; overflow: hidden; background: #fff; }
-  @media (prefers-color-scheme: dark) { html, body { background: #1e1e1e; } }
-  canvas { display: block; width: 100vw; height: 100vh; outline: none; touch-action: none; }
+  @media (prefers-color-scheme: dark) { html, body { background: #16181b; } }
+  canvas { display: block; width: 100vw; height: 100vh; height: 100dvh; outline: none; touch-action: none; }
 </style>
 </head>
 <body>
 <script type="module">
+  // Installable app + offline (sw.js). Needs HTTPS or localhost.
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
   import init from './pkg/tildown.js';
   await init();
   // Kanvas dibuat winit; beri fokus supaya bisa langsung mengetik (S1).

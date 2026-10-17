@@ -1,0 +1,51 @@
+# Builds the web app and publishes it to GitHub Pages (installable PWA).
+# One-time setup: repo Settings → Pages → Source: "GitHub Actions".
+name: Web
+on:
+  push:
+    branches: [main]
+    paths: ["src/**", "web/**", "assets/**", "Cargo.*", ".github/workflows/web.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: wasm-bindgen version from Cargo.lock
+        id: wb
+        run: echo "v=$(grep -A1 '^name = "wasm-bindgen"$' Cargo.lock | sed -n 's/^version = "\(.*\)"/\1/p')" >> "$GITHUB_OUTPUT"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@${{ steps.wb.outputs.v }}
+      - run: sh web/build.sh
+      - name: Collect site
+        run: |
+          mkdir -p site
+          cp -r web/index.html web/sw.js web/manifest.webmanifest web/icons web/pkg site/
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

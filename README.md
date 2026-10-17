@@ -27,6 +27,26 @@ Built from scratch in Rust on **wgpu + winit**. One codebase runs on desktop and
 - **Trash**: deleted notes can be restored for 30 days.
 - **Settings**: light, dark or system theme, text size, line width, and whether notes open in edit or read mode.
 
+## Install on your phone
+
+The web version is a Progressive Web App (PWA), so you can install it like a regular app:
+
+1. Open **https://goldalworming.github.io/tildown/** on your phone.
+2. Install it:
+   - **Android (Chrome)**: menu ⋮, then **Install app** (or **Add to Home screen**).
+   - **iPhone (Safari)**: the Share button, then **Add to Home Screen**.
+
+Once installed, TilDown opens full screen, works offline, and keeps your notes on the device.
+
+On a phone:
+- Tap a note to open it, and use the panel button at the top left to go back to the list.
+- Swipe to scroll.
+- Tap the text to bring up the keyboard.
+
+Use [Sync](#sync) to keep your notes in step with the desktop app.
+
+The site is built and published by `.github/workflows/web.yml` on every push to `main`. If you fork the repo, enable this once under **Settings → Pages → Source: GitHub Actions**.
+
 ## Sync
 
 TilDown syncs through a small server that you deploy to **your own** Cloudflare account. It is a Worker plus a SQLite Durable Object, and the free Workers plan is enough. Your notes stay in your account.

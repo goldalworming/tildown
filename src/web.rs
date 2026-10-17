@@ -45,6 +45,48 @@ export function opfs_purge(name) { run(async () => (await trashDir()).removeEntr
 export function open_url(u) { window.open(u, '_blank', 'noopener'); }
 export function clip_write(t) { navigator.clipboard?.writeText(t).catch(() => {}); }
 export function log_error(m) { console.error(m); document.title = 'TilDown — galat'; }
+// Keyboard layar: kanvas tidak memunculkan keyboard HP, jadi ketukan di
+// kanvas (saat ada isian aktif) memfokuskan textarea tersembunyi ini dan
+// isinya diteruskan ke aplikasi. Dua spasi lebar-nol sebagai isi supaya
+// Backspace tetap terkirim walau "kosong".
+let kb, kbOn = false;
+export function kb_init(cb) {
+  kb = document.createElement('textarea');
+  kb.setAttribute('autocapitalize', 'sentences');
+  kb.setAttribute('aria-hidden', 'true');
+  Object.assign(kb.style, { position: 'fixed', left: '0', top: '0', width: '1px', height: '1px',
+    opacity: '0', border: '0', padding: '0', resize: 'none', fontSize: '16px' });
+  document.body.appendChild(kb);
+  const Z = '\u200b\u200b';
+  const reset = () => { kb.value = Z; kb.setSelectionRange(2, 2); };
+  reset();
+  let comp = false;
+  kb.addEventListener('compositionstart', () => { comp = true; });
+  kb.addEventListener('compositionupdate', (e) => cb(1, e.data || ''));
+  kb.addEventListener('compositionend', (e) => { comp = false; cb(2, e.data || ''); reset(); });
+  kb.addEventListener('input', (e) => {
+    if (comp || e.isComposing) return;
+    const t = e.inputType;
+    if (t === 'insertText' && e.data) cb(2, e.data);
+    else if (t === 'insertLineBreak' || t === 'insertParagraph') cb(3, '');
+    else if (t === 'deleteContentBackward') cb(4, '');
+    else if (t === 'insertFromPaste' || t === 'insertReplacementText') cb(2, kb.value.replaceAll('\u200b', ''));
+    reset();
+  });
+  // Tombol fisik (keyboard Bluetooth) yang tidak lewat `input`.
+  kb.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); cb(3, ''); }
+    else if (e.key === 'Backspace' && kb.value === Z && !e.isComposing) { e.preventDefault(); cb(4, ''); }
+  });
+  // Fokus di dalam gesture ketukan, supaya browser mau membuka keyboard.
+  document.addEventListener('pointerup', (e) => {
+    if (e.pointerType !== 'mouse' && kbOn) kb.focus({ preventScroll: true });
+  }, true);
+}
+export function kb_editing(on) {
+  kbOn = on;
+  if (!on && document.activeElement === kb) kb.blur();
+}
 export function download(name, bytes) {
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([bytes], { type: 'image/png' }));
@@ -69,8 +111,19 @@ extern "C" {
     pub fn clip_write(t: &str);
     pub fn log_error(m: &str);
     pub fn download(name: &str, bytes: &[u8]);
+    pub fn kb_editing(on: bool);
+    #[wasm_bindgen(js_name = kb_init)]
+    fn kb_init_js(cb: &Closure<dyn FnMut(u8, String)>);
     #[wasm_bindgen(catch, js_name = http_post)]
     async fn http_post_js(url: &str, token: &str, body: &str) -> Result<JsValue, JsValue>;
+}
+
+/// Pasang keyboard layar; `f(jenis, teks)` dipanggil untuk tiap ketikan
+/// (1 = preedit, 2 = teks, 3 = Enter, 4 = Backspace).
+pub fn kb_init(f: impl FnMut(u8, String) + 'static) {
+    let c = Closure::<dyn FnMut(u8, String)>::new(f);
+    kb_init_js(&c);
+    c.forget(); // hidup selama halaman
 }
 
 /// `POST` untuk sync → (status, isi).
