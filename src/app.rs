@@ -201,6 +201,8 @@ enum Btn {
     /// Buat token acak (disalin ke clipboard) / buka halaman deploy server.
     GenToken,
     Deploy,
+    /// Salin kode koneksi (URL + token) untuk perangkat lain.
+    CopyCode,
 }
 
 /// Tombol "Deploy to Cloudflare" untuk `server/`.
@@ -2443,7 +2445,7 @@ impl App {
             }
             let by = y + (64.0 + 2.0 * 88.0 + 8.0) * s;
             if self.sync.on() {
-                row(&mut v, by, 2, &|i| if i == 0 { Btn::SyncConnect } else { Btn::SyncNow });
+                row(&mut v, by, 3, &|i| [Btn::SyncConnect, Btn::SyncNow, Btn::CopyCode][i]);
             } else {
                 row(&mut v, by, 1, &|_| Btn::SyncConnect);
             }
@@ -2540,6 +2542,10 @@ impl App {
             }
             Btn::Deploy => open_url(DEPLOY_URL),
             Btn::SyncNow => self.sync_due = Some(Instant::now()),
+            Btn::CopyCode => {
+                clip_set(&self.sync.code());
+                self.sync_msg = Some("Code copied. On another device, paste it into Server URL.");
+            }
             Btn::MatchPrev => self.goto_match(-1),
             Btn::MatchNext => self.goto_match(1),
             Btn::Purge(i) => {
@@ -3950,7 +3956,7 @@ impl App {
         } else if self.settings == Some(2) {
             for (k, l) in [
                 "Sync through your own Cloudflare Worker (free plan): generate a",
-                "token, deploy the server with it, then paste the Worker URL here.",
+                "token, deploy the server, then paste the Worker URL or a device code.",
             ]
             .iter()
             .enumerate()
@@ -4048,9 +4054,10 @@ impl App {
                     p.rframe(r, 6.0 * s, lw, if hot { t.dim } else { t.border });
                     p.center(r, Face::Medium, px, if b == Btn::Deploy { "Deploy ↗" } else { "Generate" }, t.fg);
                 }
-                Btn::SyncConnect | Btn::SyncNow => {
+                Btn::SyncConnect | Btn::SyncNow | Btn::CopyCode => {
                     let label = match b {
                         Btn::SyncNow => "Sync now",
+                        Btn::CopyCode => "Copy code",
                         _ if self.sync.on() => "Disconnect",
                         _ => "Connect",
                     };

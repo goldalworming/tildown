@@ -57,7 +57,7 @@ TilDown syncs through a small server that you deploy to **your own** Cloudflare 
 
    [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/goldalworming/tildown/tree/main/server)
 
-3. Press **Connect**. On your other devices, enter the same URL and token, then press **Connect**.
+3. Press **Connect**. Then press **Copy code**: it copies the server URL and token as one code. On your other devices, paste that code into **Server URL** and press **Connect**. Keep the code private, because it gives full access to your notes.
 
 How syncing works:
 - TilDown sends changes a few seconds after you save, checks for new changes every minute while the window is active, and syncs when you switch away.

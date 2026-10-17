@@ -100,7 +100,13 @@ impl Sync {
     }
 
     /// Ganti server: lupakan semua versi (sync pertama mencocokkan ulang).
+    /// `url`/`token` boleh berupa kode koneksi (`<url>#<token>`, lihat `code`)
+    /// yang ditempel di salah satu isian.
     pub fn connect(&mut self, url: &str, token: &str) {
+        let (url, token) = [url, token]
+            .into_iter()
+            .find_map(|s| s.trim().split_once('#'))
+            .unwrap_or((url, token));
         let mut url = url.trim().trim_end_matches('/').to_owned();
         if !url.is_empty() && !url.contains("://") {
             url = format!("https://{url}");
@@ -110,6 +116,11 @@ impl Sync {
             token: token.trim().to_owned(),
             ..Sync::default()
         };
+    }
+
+    /// Satu kode untuk perangkat lain: URL dan token sekaligus.
+    pub fn code(&self) -> String {
+        format!("{}#{}", self.url, self.token)
     }
 
     pub fn endpoint(&self) -> String {
@@ -398,6 +409,19 @@ mod tests {
         let (a, b) = (new_token(), new_token());
         assert_eq!(a.len(), 64);
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn code() {
+        let mut a = Sync::default();
+        a.connect("tildown-sync.x.workers.dev/", "abc123");
+        let code = a.code();
+        assert_eq!(code, "https://tildown-sync.x.workers.dev#abc123");
+        for (u, t) in [(code.as_str(), ""), ("", code.as_str()), (code.as_str(), "old")] {
+            let mut b = Sync::default();
+            b.connect(u, t);
+            assert_eq!((b.url.as_str(), b.token.as_str()), (a.url.as_str(), "abc123"));
+        }
     }
 
     #[test]
