@@ -183,7 +183,7 @@ docs/PRD.md     product requirements (Indonesian)
 
 ## Credits
 
-- Fonts: [IBM Plex](https://github.com/IBM/plex), [Noto Sans](https://fonts.google.com/noto) and [DigitalKhatt Madina](https://github.com/DigitalKhatt/madinafont) (Arabic), all under the SIL Open Font License. Emoji: [Twemoji](https://github.com/twitter/twemoji) via [Twemoji Mozilla](https://github.com/mozilla/twemoji-colr), graphics under CC-BY 4.0.
+- Fonts: [IBM Plex](https://github.com/IBM/plex), [Noto Sans](https://fonts.google.com/noto) and [DigitalKhatt Madina](https://github.com/DigitalKhatt/madinafont) (Arabic) with a subset of [Noto Naskh Arabic](https://github.com/notofonts/arabic) for the few Arabic characters it lacks, all under the SIL Open Font License. Emoji: [Twemoji](https://github.com/twitter/twemoji) via [Twemoji Mozilla](https://github.com/mozilla/twemoji-colr), graphics under CC-BY 4.0.
 - Icons: [Lucide](https://lucide.dev) (ISC).
 
 ## License

@@ -34,6 +34,27 @@ impl Face {
     pub fn css(self) -> bool {
         (self as usize) < Face::Dia as usize
     }
+
+    /// Font sistem bergaya sama: cadangan untuk huruf yang tidak ada di Plex
+    /// (transliterasi ḥ ṭ ṣ, simbol, …).
+    fn system(self) -> Face {
+        match self {
+            Face::Bold => Face::DiaBold,
+            Face::Italic => Face::DiaItalic,
+            Face::Mono => Face::DiaMono,
+            Face::Regular | Face::Medium | Face::Semi => Face::Dia,
+            f => f,
+        }
+    }
+}
+
+/// Sumber glyph untuk satu huruf: salah satu face, atau font cadangan `fb[i]`.
+#[derive(Clone, Copy, PartialEq)]
+enum Pick {
+    Face(Face),
+    /// Noto Naskh (karakter Arab di luar DigitalKhatt).
+    Naskh,
+    Fb(usize),
 }
 
 /// IBM Plex, urut sesuai `Face::Regular..=Face::Semi`.
@@ -48,6 +69,9 @@ const PLEX: [&[u8]; 6] = [
 
 /// DigitalKhatt (Madina, OFL): huruf Arab, di-shape dengan rustybuzz.
 const KHATT: &[u8] = include_bytes!("../assets/fonts/DigitalKhatt-Madina.otf");
+/// Noto Naskh Arabic (OFL), subset: karakter Arab yang tidak ada di DigitalKhatt
+/// (koma ، , ﷺ, bentuk presentasi dari teks salinan PDF, …), per huruf tanpa shaping.
+const NASKH: &[u8] = include_bytes!("../assets/fonts/NotoNaskhArabic-Extra.ttf");
 /// Huruf Arab tampil lebih kecil dari Latin pada em yang sama: diperbesar.
 const AR_SCALE: f32 = 1.3;
 
@@ -167,11 +191,14 @@ pub struct Fonts {
     hb: rustybuzz::Face<'static>,
     emo: FontRef<'static>,
     emo_hb: rustybuzz::Face<'static>,
+    naskh: FontRef<'static>,
     /// Kata Arab / deret emoji yang sudah di-shape, per ukuran.
     // ponytail: tidak pernah dikosongkan; sebesar kosakata yang pernah tampil.
     shaped: HashMap<(bool, u16, String), Vec<Shaped>>,
     ar_glyphs: HashMap<(u16, u16), Option<Glyph>>,
     emo_glyphs: HashMap<(u16, u16), Option<Glyph>>,
+    /// Tinggi tinta glyph Arab (atas, bawah baseline) per ukuran.
+    ar_ink: HashMap<(u16, u16), (f32, f32)>,
     /// Font cadangan yang sudah dicoba dibaca (`None` = tidak ada).
     fb: Vec<Option<FontVec>>,
     glyphs: HashMap<(Face, u16, char), Option<Glyph>>,
@@ -289,10 +316,12 @@ impl Fonts {
             ar: FontRef::try_from_slice(KHATT).expect("DigitalKhatt"),
             hb: rustybuzz::Face::from_slice(KHATT, 0).expect("DigitalKhatt"),
             emo: FontRef::try_from_slice(EMOJI).expect("Twemoji"),
+            naskh: FontRef::try_from_slice(NASKH).expect("Noto Naskh"),
             emo_hb: rustybuzz::Face::from_slice(EMOJI, 0).expect("Twemoji"),
             shaped: HashMap::new(),
             ar_glyphs: HashMap::new(),
             emo_glyphs: HashMap::new(),
+            ar_ink: HashMap::new(),
             fb: Vec::new(),
             glyphs: HashMap::new(),
             advs: HashMap::new(),
@@ -351,13 +380,18 @@ impl Fonts {
             return a;
         }
         let a = match self.pick(f, c) {
-            Some(Some(i)) => {
+            Some(Pick::Fb(i)) => {
                 let fb = self.fb[i].as_ref().unwrap();
                 fb.as_scaled(em_scale(fb, k.1)).h_advance(fb.glyph_id(c))
             }
+            Some(Pick::Naskh) => self.naskh.as_scaled(em_scale(&self.naskh, k.1)).h_advance(self.naskh.glyph_id(c)),
             pick => {
-                let font = &self.faces[f as usize];
-                let a = font.as_scaled(self.scale(f, k.1)).h_advance(font.glyph_id(c));
+                let g = match pick {
+                    Some(Pick::Face(g)) => g,
+                    _ => f,
+                };
+                let font = &self.faces[g as usize];
+                let a = font.as_scaled(self.scale(g, k.1)).h_advance(font.glyph_id(c));
                 if pick.is_none() {
                     return a; // font cadangan belum siap (web): jangan disimpan
                 }
@@ -368,11 +402,19 @@ impl Fonts {
         a
     }
 
-    /// Font untuk `c` yang tidak ada di `f`: `Some(Some(i))` = `fb[i]`,
-    /// `Some(None)` = pakai `f`, `None` = font cadangan masih diunduh.
-    fn pick(&mut self, f: Face, c: char) -> Option<Option<usize>> {
-        if c.is_whitespace() || c.is_control() || self.faces[f as usize].glyph_id(c).0 != 0 {
-            return Some(None);
+    /// Font untuk `c`: `f` sendiri, font sistem bergaya sama, lalu font
+    /// cadangan (CJK). `None` = font cadangan masih diunduh (web).
+    fn pick(&mut self, f: Face, c: char) -> Option<Pick> {
+        let has = |g: Face| self.faces[g as usize].glyph_id(c).0 != 0;
+        if c.is_whitespace() || c.is_control() || has(f) {
+            return Some(Pick::Face(f));
+        }
+        // Arab dulu ke Naskh (sama di semua platform), selain itu font sistem.
+        if is_arabic(c) && self.naskh.glyph_id(c).0 != 0 {
+            return Some(Pick::Naskh);
+        }
+        if has(f.system()) {
+            return Some(Pick::Face(f.system()));
         }
         #[cfg(not(target_arch = "wasm32"))]
         while self.fb.len() < FALLBACK.len() && !self.fb.iter().flatten().any(|fb| fb.glyph_id(c).0 != 0) {
@@ -387,7 +429,10 @@ impl Fonts {
                 None => self.fb.push(None),
             }
         }
-        Some(self.fb.iter().position(|fb| fb.as_ref().is_some_and(|fb| fb.glyph_id(c).0 != 0)))
+        Some(match self.fb.iter().position(|fb| fb.as_ref().is_some_and(|fb| fb.glyph_id(c).0 != 0)) {
+            Some(i) => Pick::Fb(i),
+            None => Pick::Face(f),
+        })
     }
 
     pub fn width(&mut self, f: Face, px: f32, s: &str) -> f32 {
@@ -401,13 +446,18 @@ impl Fonts {
         }
         let pick = self.pick(f, c);
         let bitmap = match pick {
-            Some(Some(i)) => {
+            Some(Pick::Fb(i)) => {
                 let fb = self.fb[i].as_ref().unwrap();
                 raster(fb, fb.glyph_id(c), em_scale(fb, k.1))
             }
+            Some(Pick::Naskh) => raster(&self.naskh, self.naskh.glyph_id(c), em_scale(&self.naskh, k.1)),
             _ => {
-                let font = &self.faces[f as usize];
-                raster(font, font.glyph_id(c), self.scale(f, k.1))
+                let g = match pick {
+                    Some(Pick::Face(g)) => g,
+                    _ => f,
+                };
+                let font = &self.faces[g as usize];
+                raster(font, font.glyph_id(c), self.scale(g, k.1))
             }
         };
         let g = self.place(bitmap, false);
@@ -477,6 +527,28 @@ impl Fonts {
         let g = self.place(bitmap, true);
         self.emo_glyphs.insert(k, g);
         g
+    }
+
+    /// Batas tinta glyph Arab `gid` di atas dan di bawah baseline (px). Font
+    /// mushaf melaporkan ascent/descent sangat besar, jadi tinggi baris diukur
+    /// dari glyph yang benar-benar tampil.
+    fn ar_ink(&mut self, px: f32, gid: u16) -> (f32, f32) {
+        let k = (key_px(px * AR_SCALE), gid);
+        if let Some(&v) = self.ar_ink.get(&k) {
+            return v;
+        }
+        let u = k.0 as f32 / self.hb.units_per_em() as f32;
+        let v = self
+            .hb
+            .glyph_bounding_box(rustybuzz::ttf_parser::GlyphId(gid))
+            .map_or((0.0, 0.0), |b| (b.y_max as f32 * u, -b.y_min as f32 * u));
+        self.ar_ink.insert(k, v);
+        v
+    }
+
+    /// DigitalKhatt punya glyph untuk `c` (selain itu: per huruf, lewat `pick`).
+    fn has_ar(&self, c: char) -> bool {
+        self.ar.glyph_id(c).0 != 0
     }
 
     /// Twemoji punya glyph untuk `c`.
@@ -825,12 +897,12 @@ pub fn layout(f: &mut Fonts, text: &str, runs: &[(usize, Style)], width: f32, lh
             continue;
         }
         let emoji = is_emoji(c) && f.has_emoji(c);
-        if is_arabic(c) || emoji {
+        if (is_arabic(c) && f.has_ar(c)) || emoji {
             // Satu kata: huruf Arab (atau deret emoji) berurutan dalam gaya yang sama.
             let run_end = if r + 1 < runs.len() { runs[r].0 } else { text.len() };
             let mut j = i + c.len_utf8();
             while let Some(&(k, d)) = it.peek() {
-                if k >= run_end || !(if emoji { emoji_part(d) } else { is_arabic(d) }) {
+                if k >= run_end || !(if emoji { emoji_part(d) } else { is_arabic(d) && f.has_ar(d) }) {
                     break;
                 }
                 j = k + d.len_utf8();
@@ -918,6 +990,15 @@ pub fn layout(f: &mut Fonts, text: &str, runs: &[(usize, Style)], width: f32, lh
             asc = asc.max(m.0);
             desc = desc.max(m.1);
             bh = bh.max(lb[g.st as usize]);
+            // Huruf Arab + harakat: ukur tintanya, beri jarak 15% em.
+            if let (Some((gid, _, dy)), false) = (g.ar, g.emoji) {
+                if gid != 0 {
+                    let px = styles[g.st as usize].px;
+                    let (t, b) = f.ar_ink(px, gid);
+                    asc = asc.max(t + dy + 0.15 * px);
+                    desc = desc.max(b - dy + 0.15 * px);
+                }
+            }
         }
         if row.gs.is_empty() {
             let ri = runs
@@ -927,11 +1008,8 @@ pub fn layout(f: &mut Fonts, text: &str, runs: &[(usize, Style)], width: f32, lh
             (asc, desc) = sm[ri];
             bh = lb[ri];
         }
-        if row.rtl {
-            bh *= 1.25; // harakat di atas/bawah huruf Arab butuh ruang
-        }
         let th = asc + desc;
-        row.h = bh.ceil();
+        row.h = bh.max(th).ceil();
         row.top = y;
         row.base = (y + (row.h - th) / 2.0 + asc).round();
         row.w = row.gs.iter().map(|g| g.x + g.adv).fold(0.0, f32::max);

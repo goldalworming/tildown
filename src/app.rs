@@ -3683,6 +3683,11 @@ impl App {
                     self.layout_views();
                     self.open_viewer(0);
                 }
+                ("scroll", v) => {
+                    self.layout_views();
+                    self.scroll[self.mode as usize] = v.parse().unwrap_or(0.0);
+                    self.clamp_scroll();
+                }
                 ("menu", xy) => {
                     if let Some((x, y)) = xy.split_once('x') {
                         self.layout_views();
