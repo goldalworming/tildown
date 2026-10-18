@@ -576,7 +576,9 @@ pub fn parse(src: &str) -> Parsed {
             }
             Event::Text(t) | Event::Html(t) | Event::InlineHtml(t) => (t.into_string(), st),
             Event::Code(t) => (t.into_string(), Inl { code: true, ..st }),
-            Event::SoftBreak => (" ".to_owned(), st),
+            // Enter = baris baru (seperti di editor), bukan spasi ala CommonMark.
+            Event::SoftBreak => ("
+".to_owned(), st),
             Event::HardBreak => ("\n".to_owned(), st),
             _ => continue,
         };
