@@ -80,7 +80,12 @@ struct Tap {
     start: (f32, f32),
     last: (f32, f32),
     moved: bool,
+    t0: Instant,
+    /// Ditahan diam ≥ `LONG_PRESS`: jari memilih teks, bukan menggulir.
+    held: bool,
 }
+
+const LONG_PRESS: Duration = Duration::from_millis(450);
 
 /// Ukuran heading editor relatif terhadap isi (# 24, ## 20, ### 18).
 fn hscale(n: u8) -> f32 {
@@ -215,6 +220,8 @@ enum Btn {
     Share,
     CopyLink,
     Unshare,
+    /// Menu konteks (klik kanan / tekan lama): 0 Cut, 1 Copy, 2 Paste, 3 Select all.
+    Menu(u8),
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -635,6 +642,25 @@ impl RdView {
             prev_bottom = Some(iy + lay.h);
         }
         out
+    }
+
+    /// Kata (rentang byte) di sekitar byte `i` item `k`. Harakat dan huruf
+    /// non-ASCII lain dianggap bagian kata.
+    fn word_at(&self, k: usize, i: usize) -> (usize, usize) {
+        let mut cs: Vec<(usize, char)> = self.items[k].2.rows.iter().flat_map(|r| &r.gs).map(|g| (g.i, g.c)).collect();
+        cs.sort_by_key(|g| g.0);
+        cs.dedup_by_key(|g| g.0);
+        let w = |c: char| c.is_alphanumeric() || c == '_' || !(c.is_ascii() || c.is_whitespace());
+        let end = |j: usize| cs.get(j).map_or_else(|| cs.last().map_or(i, |g| g.0 + g.1.len_utf8()), |g| g.0);
+        let Some(n) = cs.iter().position(|g| g.0 >= i).or(cs.len().checked_sub(1)) else {
+            return (i, i);
+        };
+        if !w(cs[n].1) {
+            return (cs[n].0, end(n + 1));
+        }
+        let a = (0..=n).rev().take_while(|&j| w(cs[j].1)).last().unwrap_or(n);
+        let b = (n..cs.len()).find(|&j| !w(cs[j].1)).unwrap_or(cs.len());
+        (cs[a].0, end(b))
     }
 
     fn link_at(&self, x: f32, y: f32) -> Option<&str> {
@@ -1888,6 +1914,8 @@ pub struct App {
     upd_busy: bool,
     upd: Option<Result<String, String>>,
     share_busy: bool,
+    /// Menu konteks terbuka di titik ini; `true` = dari sentuhan (tampil di atas jari).
+    menu: Option<(f32, f32, bool)>,
     /// Pesan biasa di toolbar (bukan galat), hilang saat mengetik/pindah catatan.
     notice: String,
     focused: bool,
@@ -2031,6 +2059,7 @@ impl App {
             upd_busy: false,
             upd: None,
             share_busy: false,
+            menu: None,
             notice: String::new(),
             focused: true,
             tap: None,
@@ -2579,7 +2608,7 @@ impl App {
         let r = |x: f32, y: f32, bw: f32, bh: f32| {
             Rect::new(x.round(), y.round(), (bw * s).round(), (bh * s).round())
         };
-        let mut v = Vec::new();
+        let mut v = self.menu_hits();
         let geo = self.geo();
         if self.side_open {
             let sw = geo.side.w;
@@ -2740,6 +2769,7 @@ impl App {
             Btn::Settings => self.open_settings(0),
             Btn::Mode => self.toggle_mode(),
             Btn::Delete => self.delete_note(),
+            Btn::Menu(i) => self.menu_do(i),
             Btn::Share => self.share(true),
             Btn::Unshare => self.share(false),
             Btn::CopyLink => {
@@ -3371,6 +3401,11 @@ impl App {
             self.set_icon(CursorIcon::Grabbing);
             return;
         }
+        // Klik di luar menu konteks hanya menutupnya.
+        if self.menu.take().is_some() {
+            self.redraw();
+            return;
+        }
         self.dia_press = None;
         let geo = self.geo();
         let shift = self.mods.shift_key();
@@ -3623,6 +3658,13 @@ impl App {
                     self.layout_views();
                     self.open_viewer(0);
                 }
+                ("menu", xy) => {
+                    if let Some((x, y)) = xy.split_once('x') {
+                        self.layout_views();
+                        self.mouse_move(x.parse().unwrap_or(0.0), y.parse().unwrap_or(0.0));
+                        self.right_click();
+                    }
+                }
                 ("hover", xy) => {
                     if let Some((x, y)) = xy.split_once('x') {
                         let (x, y) = (x.parse().unwrap_or(0.0), y.parse().unwrap_or(0.0));
@@ -3662,13 +3704,16 @@ impl App {
     fn touch_ui(&mut self, id: u64, phase: TouchPhase, pos: (f32, f32)) {
         match phase {
             TouchPhase::Started if self.tap.is_none() => {
-                self.tap = Some(Tap { id, start: pos, last: pos, moved: false });
+                self.tap = Some(Tap { id, start: pos, last: pos, moved: false, t0: Instant::now(), held: false });
             }
             TouchPhase::Moved => {
                 let slop = 10.0 * self.s;
                 let Some(tp) = self.tap.as_mut().filter(|tp| tp.id == id) else {
                     return;
                 };
+                if tp.held {
+                    return self.mouse_move(pos.0, pos.1); // perluas seleksi
+                }
                 tp.moved |= (pos.0 - tp.start.0).hypot(pos.1 - tp.start.1) > slop;
                 let (d, start, moved) = ((pos.0 - tp.last.0, pos.1 - tp.last.1), tp.start, tp.moved);
                 tp.last = pos;
@@ -3678,7 +3723,13 @@ impl App {
                 }
             }
             TouchPhase::Ended if self.tap.as_ref().is_some_and(|tp| tp.id == id) => {
-                if !self.tap.take().is_some_and(|tp| tp.moved) {
+                let tp = self.tap.take();
+                if tp.as_ref().is_some_and(|tp| tp.held) {
+                    self.release();
+                    if let Some(m) = &mut self.menu {
+                        (m.0, m.1) = pos; // menu di dekat jari terakhir
+                    }
+                } else if !tp.is_some_and(|tp| tp.moved) {
                     self.mouse_move(pos.0, pos.1);
                     self.press();
                     self.release();
@@ -3687,6 +3738,161 @@ impl App {
             }
             TouchPhase::Cancelled => self.tap = None,
             _ => {}
+        }
+    }
+
+    /// Tekan lama di isi catatan: pilih kata di bawah jari; geser untuk
+    /// memperluas, lalu tombol Copy muncul.
+    fn long_press(&mut self) {
+        let Some(tp) = self.tap.as_mut() else { return };
+        tp.held = true;
+        let (x, y) = tp.start;
+        let geo = self.geo();
+        if self.settings.is_some() || !geo.content.contains(x, y) || (self.side_open && self.narrow()) {
+            return;
+        }
+        self.mouse_move(x, y);
+        match self.mode {
+            Mode::Edit => {
+                self.clicks = (Instant::now(), 1, (x, y)); // press berikut = klik ganda: pilih kata
+                self.press();
+            }
+            Mode::Read => {
+                self.layout_views();
+                let (ox, oy) = self.ed_origin(&geo);
+                if let Some((k, i)) = self.rd.pos_at(x - ox, y - oy) {
+                    let (a, b) = self.rd.word_at(k, i);
+                    self.rd.sel = Some(((k, a), (k, b)));
+                    self.drag = Some(Drag::Read);
+                }
+            }
+        }
+        self.menu = Some((x, y, true));
+        self.redraw();
+    }
+
+    /// Klik kanan di isi catatan: taruh kursor di situ (kecuali di dalam
+    /// seleksi), lalu buka menu konteks.
+    fn right_click(&mut self) {
+        let (x, y) = self.mouse;
+        let geo = self.geo();
+        if self.settings.is_some() || self.zoom.is_some() || !geo.content.contains(x, y) {
+            return;
+        }
+        if !self.has_selection() {
+            self.layout_views();
+            let (ox, oy) = self.ed_origin(&geo);
+            match self.mode {
+                Mode::Edit => {
+                    let p = self.ed.pos_at(x - ox, y - oy);
+                    self.doc.set_cursor(p, false);
+                    self.focus = Focus::Editor;
+                }
+                Mode::Read => self.rd.sel = None,
+            }
+        }
+        self.menu = Some((x, y, false));
+        self.redraw();
+    }
+
+    /// Isi menu konteks: (aksi, label, pintasan).
+    fn menu_items(&self) -> Vec<(u8, &'static str, &'static str)> {
+        let sel = self.has_selection();
+        let mut v = Vec::new();
+        if self.mode == Mode::Edit && sel {
+            v.push((0, "Cut", "Ctrl+X"));
+        }
+        if sel {
+            v.push((1, "Copy", "Ctrl+C"));
+        }
+        if self.mode == Mode::Edit {
+            v.push((2, "Paste", "Ctrl+V"));
+        }
+        v.push((3, "Select all", "Ctrl+A"));
+        v
+    }
+
+    fn menu_hits(&mut self) -> Vec<(Rect, Btn)> {
+        let Some((x, y, touch)) = self.menu else { return Vec::new() };
+        let s = self.s;
+        let items = self.menu_items();
+        let (iw, ih) = ((180.0 * s).round(), (36.0 * s).round());
+        let h = ih * items.len() as f32 + 8.0 * s;
+        // Di dalam jendela; sentuhan: di atas jari supaya tidak tertutup.
+        let x = x.min(self.size.0 - iw - 8.0 * s).max(8.0 * s);
+        let y = if touch { y - h - 24.0 * s } else { y };
+        let y = y.min(self.size.1 - h - 8.0 * s).max(8.0 * s);
+        items
+            .iter()
+            .enumerate()
+            .map(|(k, it)| (Rect::new(x.round(), (y + 4.0 * s + k as f32 * ih).round(), iw, ih), Btn::Menu(it.0)))
+            .collect()
+    }
+
+    fn menu_do(&mut self, i: u8) {
+        self.menu = None;
+        match (i, self.mode) {
+            (0, Mode::Edit) => {
+                clip_set(self.doc.selected_text());
+                self.doc.insert("");
+                self.changed();
+            }
+            (1, Mode::Edit) => clip_set(self.doc.selected_text()),
+            (1, Mode::Read) => clip_set(&self.rd.selected_text()),
+            (2, _) => {
+                // Web: clipboard dibaca async, lanjut di `Ev::Kb(6, …)` (paste_text).
+                #[cfg(target_arch = "wasm32")]
+                crate::web::clip_paste();
+                #[cfg(not(target_arch = "wasm32"))]
+                if !self.paste_image() {
+                    if let Some(t) = clip_get() {
+                        self.doc.insert(&t.replace("\r\n", "\n"));
+                        self.changed();
+                    }
+                }
+            }
+            (3, Mode::Edit) => self.doc.select_all(),
+            (3, Mode::Read) => {
+                let n = self.rd.items.len();
+                self.rd.sel = (n > 0).then_some(((0, 0), (n - 1, usize::MAX)));
+            }
+            _ => {}
+        }
+    }
+
+    fn paint_menu(&mut self, p: &mut P, hits: &[(Rect, Btn)]) {
+        let (t, s) = (self.theme, self.s);
+        let items: Vec<(Rect, u8)> = hits
+            .iter()
+            .filter_map(|h| match h.1 {
+                Btn::Menu(i) => Some((h.0, i)),
+                _ => None,
+            })
+            .collect();
+        let (Some(first), Some(last)) = (items.first(), items.last()) else { return };
+        let r = Rect::new(first.0.x, first.0.y - 4.0 * s, first.0.w, last.0.y + last.0.h - first.0.y + 8.0 * s);
+        p.rrect(Rect::new(r.x, r.y + 2.0 * s, r.w, r.h), 8.0 * s, alpha(t.fg, 0.12)); // bayangan
+        p.rrect(r, 8.0 * s, t.bg);
+        p.rframe(r, 8.0 * s, p.lw(), t.border);
+        let names = self.menu_items();
+        for (ir, i) in items {
+            let Some(&(_, label, keys)) = names.iter().find(|n| n.0 == i) else { continue };
+            let hot = Rect::new(ir.x + 4.0 * s, ir.y, ir.w - 8.0 * s, ir.h);
+            self.hover_bg(p, hot, Btn::Menu(i));
+            let base = p.base(Face::Regular, 14.0 * s, ir.y, ir.h);
+            p.text(ir.x + 14.0 * s, base, Face::Regular, 14.0 * s, label, t.fg, ir.w);
+            if !self.narrow() {
+                let kw = p.f.width(Face::Regular, 13.0 * s, keys);
+                p.text(ir.x + ir.w - 14.0 * s - kw, base, Face::Regular, 13.0 * s, keys, t.dim, kw + 1.0);
+            }
+        }
+    }
+
+    /// Ada teks terpilih di editor / mode baca.
+    fn has_selection(&self) -> bool {
+        match self.mode {
+            Mode::Edit => self.doc.selection().0 != self.doc.selection().1,
+            Mode::Read => self.rd.sel.is_some_and(|(a, b)| a != b),
         }
     }
 
@@ -3957,6 +4163,7 @@ impl App {
             );
         }
         let _ = lw;
+        self.paint_menu(p, &hits);
         if self.settings.is_some() {
             let hits = self.frame_hits.clone();
             self.paint_settings(p, &hits);
@@ -4805,12 +5012,16 @@ impl ApplicationHandler<Ev> for App {
             self.save_now();
             self.redraw();
         }
+        let long = |a: &Self| a.tap.as_ref().filter(|t| !t.moved && !t.held).map(|t| t.t0 + LONG_PRESS);
+        if long(self).is_some_and(|t| Instant::now() >= t) {
+            self.long_press();
+        }
         if !self.sync_busy && self.sync_due.is_some_and(|t| Instant::now() >= t) {
             self.sync_start();
         }
         // Selama sync jalan, jawabannya yang membangunkan event loop.
         let sync_due = self.sync_due.filter(|_| !self.sync_busy);
-        el.set_control_flow(match [self.save_due, sync_due].into_iter().flatten().min() {
+        el.set_control_flow(match [self.save_due, sync_due, long(self)].into_iter().flatten().min() {
             Some(t) => ControlFlow::WaitUntil(t),
             None => ControlFlow::Wait,
         });
@@ -4868,6 +5079,11 @@ impl ApplicationHandler<Ev> for App {
                 ElementState::Pressed => self.press(),
                 ElementState::Released => self.release(),
             },
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Right,
+                ..
+            } => self.right_click(),
             WindowEvent::MouseWheel { delta, .. } => self.wheel(delta),
             WindowEvent::Touch(t) => self.touch(t),
             WindowEvent::PinchGesture { delta, .. } => {

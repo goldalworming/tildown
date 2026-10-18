@@ -15,6 +15,7 @@ Built from scratch in Rust on **wgpu + winit**. One codebase runs on desktop and
   - Type to filter your notes.
   - Enter opens the top match, or creates a new note if nothing matches.
   - Matches are highlighted inside the note. Step through them with F3 or Shift+F3.
+- **Context menu**: right-click, or long-press on a phone, for Cut, Copy, Paste and Select all. On a phone, long-press selects a word; keep holding and drag to select more.
 - **Tags**: write `#tag` anywhere in a note (`#kajian`, `#work/meeting`). In read mode, click a tag to list every note with that tag. Add words after it, like `#kajian doa`, to search only within those notes.
 - **Editor**: markdown highlighting in the style of iA Writer, list and task continuation, undo/redo, and IME input.
 - **Read mode**:

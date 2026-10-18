@@ -80,6 +80,10 @@ let kb, kbOn = false, kbCb;
 export function clip_read() {
   navigator.clipboard?.readText().then(t => kbCb(7, t), () => kbCb(7, ''));
 }
+// Menu konteks "Paste": tempel seperti Ctrl+V (jenis 6).
+export function clip_paste() {
+  navigator.clipboard?.readText().then(t => t && kbCb(6, t), () => {});
+}
 export function kb_init(cb) {
   kbCb = cb;
   kb = document.createElement('textarea');
@@ -176,6 +180,7 @@ extern "C" {
     pub fn download(name: &str, bytes: &[u8]);
     pub fn kb_editing(on: bool);
     pub fn clip_read();
+    pub fn clip_paste();
     #[wasm_bindgen(js_name = kb_init)]
     fn kb_init_js(cb: &Closure<dyn FnMut(u8, String)>);
     #[wasm_bindgen(js_name = img_init)]

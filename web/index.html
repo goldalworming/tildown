@@ -15,7 +15,8 @@
 <style>
   html, body { margin: 0; height: 100%; overflow: hidden; background: #fff; }
   @media (prefers-color-scheme: dark) { html, body { background: #16181b; } }
-  canvas { display: block; width: 100vw; height: 100vh; height: 100dvh; outline: none; touch-action: none; }
+  canvas { display: block; width: 100vw; height: 100vh; height: 100dvh; outline: none; touch-action: none;
+           -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
 </style>
 </head>
 <body>
@@ -25,6 +26,8 @@
   import init from './pkg/tildown.js';
   await init();
   // Kanvas dibuat winit; beri fokus supaya bisa langsung mengetik (S1).
+  // Klik kanan / tekan lama: menu TilDown sendiri, bukan menu browser.
+  document.addEventListener('contextmenu', (e) => { if (e.target.tagName === 'CANVAS') e.preventDefault(); });
   const focus = () => document.querySelector('canvas')?.focus();
   new MutationObserver(focus).observe(document.body, { childList: true });
 </script>
