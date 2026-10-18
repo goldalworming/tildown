@@ -28,6 +28,12 @@ Built from scratch in Rust on **wgpu + winit**. One codebase runs on desktop and
 - **Trash**: deleted notes can be restored for 30 days.
 - **Settings**: light, dark or system theme, text size, line width, and whether notes open in edit or read mode.
 
+## Install on Windows
+
+Download `TilDown-<version>-setup.exe` from [Releases](https://github.com/goldalworming/tildown/releases/latest) and run it. Administrator rights are not needed. If you would rather not install anything, use `TilDown-<version>-portable.exe`, which is the same app as a single file.
+
+Notes are kept in `Documents\TilDown`, and uninstalling does not delete them.
+
 ## Install on your phone
 
 The web version is a Progressive Web App (PWA), so you can install it like a regular app:
@@ -49,6 +55,8 @@ Use [Sync](#sync) to keep your notes in step with the desktop app.
 The site is built and published by `.github/workflows/web.yml` on every push to `main`. If you fork the repo, enable this once under **Settings → Pages → Source: GitHub Actions**.
 
 ## Sync
+
+Sync is optional. Without it, TilDown works fully offline with local files.
 
 TilDown syncs through a small server that you deploy to **your own** Cloudflare account. It is a Worker plus a SQLite Durable Object, and the free Workers plan is enough. Your notes stay in your account.
 
@@ -102,6 +110,10 @@ cargo test
 ```
 
 Set `MARKDOWN_DIR=<path>` to use a different notes folder.
+
+### Release
+
+Push a tag (`git tag v0.1.0 && git push origin v0.1.0`). The **Release** workflow builds the Windows installer with [Inno Setup](https://jrsoftware.org/isinfo.php) (`installer/tildown.iss`) and publishes it with a portable exe.
 
 ### Web
 

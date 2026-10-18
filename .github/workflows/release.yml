@@ -1,0 +1,30 @@
+name: Release
+
+# Push a tag such as v0.1.0 to build the Windows installer and publish a GitHub release.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release --locked
+      - name: Installer
+        shell: pwsh
+        run: |
+          $v = "${{ github.ref_name }}".TrimStart('v')
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (!(Test-Path $iscc)) { choco install innosetup -y --no-progress }
+          & $iscc /Q "/DVersion=$v" installer\tildown.iss
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Copy-Item target\release\tildown.exe "target\installer\TilDown-$v-portable.exe"
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: target/installer/*.exe
+          generate_release_notes: true
