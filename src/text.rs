@@ -339,7 +339,7 @@ impl Fonts {
         buf.set_direction(rustybuzz::Direction::RightToLeft);
         let out = rustybuzz::shape(&self.hb, &[], buf);
         let u = k.0 as f32 / self.hb.units_per_em() as f32;
-        let v: Vec<Shaped> = out
+        let mut v: Vec<Shaped> = out
             .glyph_infos()
             .iter()
             .zip(out.glyph_positions())
@@ -351,6 +351,15 @@ impl Fonts {
                 dy: p.y_offset as f32 * u,
             })
             .collect();
+        // Tanda tanpa huruf induk (waqaf ۚ ۖ di antara spasi): font memberi
+        // lebar 0 sehingga menimpa huruf tetangga; beri ruang selebar gambarnya.
+        if v.iter().all(|g| g.adv == 0.0) {
+            for g in &mut v {
+                if let Some(b) = self.hb.glyph_bounding_box(rustybuzz::ttf_parser::GlyphId(g.gid)) {
+                    (g.dx, g.adv) = (-b.x_min as f32 * u, (b.x_max - b.x_min) as f32 * u);
+                }
+            }
+        }
         self.shaped.insert(k, v.clone());
         v
     }
