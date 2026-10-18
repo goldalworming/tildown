@@ -1399,6 +1399,32 @@ fn puml_emit(
 // ---------------------------------------------------------------------------
 // Menggambar
 
+const SYNC_INTRO: &str = "Sync through your own Cloudflare Worker (free plan): generate a token, \
+     deploy the server, then paste the Worker URL or a device code.";
+
+/// Pecah `text` per kata supaya tiap baris muat di lebar `w`.
+fn wrap_words(f: &mut Fonts, face: Face, px: f32, text: &str, w: f32) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for word in text.split_whitespace() {
+        match lines.last_mut() {
+            Some(l) if f.width(face, px, &format!("{l} {word}")) <= w => {
+                l.push(' ');
+                l.push_str(word);
+            }
+            _ => lines.push(word.to_owned()),
+        }
+    }
+    lines
+}
+
+/// Teks pembuka tab Sync dan tinggi bagiannya (dalam satuan sebelum `s`):
+/// baris 22, lalu jarak 20 sebelum isian pertama.
+fn sync_intro(f: &mut Fonts, s: f32, bw: f32) -> (Vec<String>, f32) {
+    let lines = wrap_words(f, Face::Regular, 14.0 * s, SYNC_INTRO, bw);
+    let top = 22.0 * lines.len() as f32 + 20.0;
+    (lines, top)
+}
+
 struct P<'a> {
     g: &'a mut Gpu,
     f: &'a mut Fonts,
@@ -2460,7 +2486,8 @@ impl App {
         } else if self.settings == Some(2) {
             // Teks pembuka 2 baris, lalu dua isian (judul 20 + 8 + 36) — token
             // dulu, lalu URL — masing-masing dengan tombol di kanan, lalu tombol.
-            let fy = |k: f32| (y + (64.0 + 28.0) * s + k * 88.0 * s).round();
+            let top = self.fonts.as_mut().map_or(64.0, |f| sync_intro(f, s, bw).1);
+            let fy = |k: f32| (y + (top + 28.0) * s + k * 88.0 * s).round();
             let on = self.sync.on();
             let aw = if on { 0.0 } else { (112.0 * s).round() };
             let fh = (36.0 * s).round();
@@ -2470,7 +2497,7 @@ impl App {
                     v.push((Rect::new(bx + bw - aw + 8.0 * s, fy(k as f32), aw - 8.0 * s, fh), a));
                 }
             }
-            let by = y + (64.0 + 2.0 * 88.0 + 8.0) * s;
+            let by = y + (top + 2.0 * 88.0 + 8.0) * s;
             if self.sync.on() {
                 row(&mut v, by, 3, &|i| [Btn::SyncConnect, Btn::SyncNow, Btn::CopyCode][i]);
             } else {
@@ -2577,7 +2604,7 @@ impl App {
             }
             Btn::CopyCode => {
                 clip_set(&self.sync.code());
-                self.sync_msg = Some("Code copied. On another device, paste it into Server URL.");
+                self.sync_msg = Some("Code copied. On another device, press Paste code.");
             }
             Btn::MatchPrev => self.goto_match(-1),
             Btn::MatchNext => self.goto_match(1),
@@ -3991,22 +4018,17 @@ impl App {
             let v = concat!("TilDown v", env!("CARGO_PKG_VERSION"));
             p.text(bx, b, Face::Regular, px, v, t.dim, bw);
         } else if self.settings == Some(2) {
-            for (k, l) in [
-                "Sync through your own Cloudflare Worker (free plan): generate a",
-                "token, deploy the server, then paste the Worker URL or a device code.",
-            ]
-            .iter()
-            .enumerate()
-            {
+            let (intro, top) = sync_intro(p.f, s, bw);
+            for (k, l) in intro.iter().enumerate() {
                 let b = p.base(Face::Regular, px, y0 + k as f32 * 22.0 * s, 20.0 * s);
                 p.text(bx, b, Face::Regular, px, l, t.dim, bw);
             }
             for (k, l) in ["Token", "Server URL"].iter().enumerate() {
-                let b = p.base(Face::Semi, px, y0 + (64.0 + k as f32 * 88.0) * s, 20.0 * s);
+                let b = p.base(Face::Semi, px, y0 + (top + k as f32 * 88.0) * s, 20.0 * s);
                 p.text(bx, b, Face::Semi, px, l, t.fg, bw);
             }
             let (msg, c) = self.sync_status();
-            let b = p.base(Face::Regular, px, y0 + (64.0 + 2.0 * 88.0 + 8.0 + 36.0 + 16.0) * s, 20.0 * s);
+            let b = p.base(Face::Regular, px, y0 + (top + 2.0 * 88.0 + 8.0 + 36.0 + 16.0) * s, 20.0 * s);
             p.text(bx, b, Face::Regular, px, &msg, c, bw);
         } else if self.trash.is_empty() {
             let cy = (y0 + foot) / 2.0;
