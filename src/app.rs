@@ -228,6 +228,8 @@ enum Btn {
     /// Salin kode koneksi (URL + token) untuk perangkat lain / tempel lalu connect.
     CopyCode,
     PasteCode,
+    /// Salin URL MCP untuk Claude.
+    CopyMcp,
     /// Toolbar: bagikan catatan (link baru), salin link, berhenti membagikan.
     Share,
     CopyLink,
@@ -2740,6 +2742,7 @@ impl App {
             let by = y + (top + 2.0 * 88.0 + 8.0) * s;
             if self.sync.on() {
                 row(&mut v, by, 3, &|i| [Btn::SyncConnect, Btn::SyncNow, Btn::CopyCode][i]);
+                row(&mut v, by + 44.0 * s, 1, &|_| Btn::CopyMcp);
             } else {
                 row(&mut v, by, 2, &|i| [Btn::SyncConnect, Btn::PasteCode][i]);
             }
@@ -2851,6 +2854,10 @@ impl App {
                 crate::web::clip_read(); // lanjut di `Ev::Kb(7, …)`
                 #[cfg(not(target_arch = "wasm32"))]
                 self.paste_code(clip_get().unwrap_or_default());
+            }
+            Btn::CopyMcp => {
+                clip_set(&self.sync.mcp_url());
+                self.sync_msg = Some("Copied. In Claude: Settings → Connectors → Add custom connector.");
             }
             Btn::CopyCode => {
                 clip_set(&self.sync.code());
@@ -3861,6 +3868,9 @@ impl App {
             v.push((2, "Paste", "Ctrl+V"));
         }
         v.push((3, "Select all", "Ctrl+A"));
+        if self.sync.on() {
+            v.push((4, "Copy note reference", "")); // untuk Claude: "baca tildown:…"
+        }
         v
     }
 
@@ -3902,6 +3912,11 @@ impl App {
                         self.changed();
                     }
                 }
+            }
+            (4, _) => {
+                let id = &self.store.notes[self.cur].id;
+                clip_set(&format!("tildown:{id} ({})", store::title_of(&self.doc.text)));
+                self.notice = "Note reference copied. Paste it in Claude.".into();
             }
             (3, Mode::Edit) => self.doc.select_all(),
             (3, Mode::Read) => {
@@ -4588,7 +4603,8 @@ impl App {
                 p.text(bx, b, Face::Semi, px, l, t.fg, bw);
             }
             let (msg, c) = self.sync_status();
-            let b = p.base(Face::Regular, px, y0 + (top + 2.0 * 88.0 + 8.0 + 36.0 + 16.0) * s, 20.0 * s);
+            let claude = if self.sync.on() { 44.0 } else { 0.0 }; // baris "Connect Claude"
+            let b = p.base(Face::Regular, px, y0 + (top + 2.0 * 88.0 + 8.0 + 36.0 + 16.0 + claude) * s, 20.0 * s);
             p.text(bx, b, Face::Regular, px, &msg, c, bw);
         } else if self.trash.is_empty() {
             let cy = (y0 + foot) / 2.0;
@@ -4678,8 +4694,9 @@ impl App {
                     p.rframe(r, 6.0 * s, lw, if hot { t.dim } else { t.border });
                     p.center(r, Face::Medium, px, if b == Btn::Deploy { "Deploy ↗" } else { "Generate" }, t.fg);
                 }
-                Btn::SyncConnect | Btn::SyncNow | Btn::CopyCode | Btn::PasteCode => {
+                Btn::SyncConnect | Btn::SyncNow | Btn::CopyCode | Btn::PasteCode | Btn::CopyMcp => {
                     let label = match b {
+                        Btn::CopyMcp => "Connect Claude (copy link)",
                         Btn::SyncNow => "Sync now",
                         Btn::CopyCode => "Copy code",
                         Btn::PasteCode => "Paste code",

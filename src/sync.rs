@@ -134,6 +134,11 @@ impl Sync {
         format!("{}/{}", self.url, if on { "share" } else { "unshare" })
     }
 
+    /// URL server MCP untuk Claude (konektor kustom). Rahasia, seperti token.
+    pub fn mcp_url(&self) -> String {
+        format!("{}/mcp/{}", self.url, self.token)
+    }
+
     /// Link publik catatan `id` bila sedang dibagikan.
     pub fn share_url(&self, id: &str) -> Option<String> {
         self.shares.get(id).map(|sid| format!("{}/s/{sid}", self.url))

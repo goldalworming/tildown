@@ -97,6 +97,17 @@ With sync connected, the toolbar has a **Share** button:
 
 If you deployed the server before sharing existed, update it: in the GitHub repository that the Deploy button created, replace `src/`, `package.json` and `package-lock.json` with the ones from this repo's `server/` folder. Cloudflare redeploys on push.
 
+### Claude
+
+Claude can read, search, create and edit your notes through the sync server (MCP):
+1. In TilDown → Settings → Sync, press **Connect Claude (copy link)**.
+2. In Claude (claude.ai, desktop or phone app): Settings → Connectors → **Add custom connector**, and paste the link.
+3. Ask things like "find my notes tagged #kajian" or "add this to my shopping list".
+
+To point Claude at one note, right-click (or long-press) in it, press **Copy note reference**, and paste that into the chat, e.g. "read tildown:20261018-171034 (Shopping list)".
+
+The link contains your token: anyone who has it can read and change your notes, so keep it private. Claude cannot delete notes. Its changes reach your devices on the next sync.
+
 To deploy by hand instead of using the button:
 
 ```sh
