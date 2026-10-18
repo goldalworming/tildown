@@ -2811,6 +2811,15 @@ impl App {
         self.search.select_all();
     }
 
+    /// Buka pencarian berisi `q` (klik tag: daftar catatan bertag sama,
+    /// kursor di akhir untuk menambah kata).
+    fn search_for(&mut self, q: &str) {
+        self.open_search();
+        self.search = Doc::new(q);
+        self.list_scroll = 0.0;
+        self.refilter();
+    }
+
     fn close_search(&mut self) {
         self.search_open = false;
         self.search = Doc::default();
@@ -3347,7 +3356,13 @@ impl App {
                             .replace_range(r.start, r.end, if done { "[ ]" } else { "[x]" });
                         self.changed();
                     } else if let Some(u) = self.rd.link_at(rx, ry) {
-                        open_url(u);
+                        match u.strip_prefix("tag:") {
+                            Some(t) => {
+                                let q = format!("{t} ");
+                                self.search_for(&q);
+                            }
+                            None => open_url(u),
+                        }
                     } else if let Some(p) = self.rd.pos_at(rx, ry) {
                         self.dia_press = self
                             .rd

@@ -340,6 +340,22 @@ fn flush(cur: &mut Option<Block>, out: &mut Vec<Block>) {
     }
 }
 
+/// Teks dengan tag `#nama` jadi tautan `tag:nama` (klik = cari tag itu).
+fn push_tags(r: &mut Rich, links: &mut Vec<String>, s: &str, st: Inl) {
+    if st.code || st.link.is_some() {
+        return r.push(s, st);
+    }
+    let mut last = 0;
+    for (a, b) in crate::store::tag_spans(s) {
+        r.push(&s[last..a], st);
+        links.push(format!("tag:{}", s[a..b].to_lowercase()));
+        let link = Some((links.len() - 1).min(u16::MAX as usize - 1) as u16);
+        r.push(&s[a..b], Inl { link, ..st });
+        last = b;
+    }
+    r.push(&s[last..], st);
+}
+
 pub fn parse(src: &str) -> Parsed {
     let opts = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
     let mut p = Parsed::default();
@@ -524,11 +540,10 @@ pub fn parse(src: &str) -> Parsed {
         if let Some((_, alt)) = &mut image {
             alt.push_str(&s);
         } else if let Some(c) = &mut cell {
-            c.push(&s, inl);
+            push_tags(c, &mut p.links, &s, inl);
         } else {
-            cur.get_or_insert_with(|| block(BKind::Para, lists.len(), quote).unwrap())
-                .rich
-                .push(&s, inl);
+            let b = cur.get_or_insert_with(|| block(BKind::Para, lists.len(), quote).unwrap());
+            push_tags(&mut b.rich, &mut p.links, &s, inl);
         }
     }
     flush(&mut cur, &mut p.blocks);
@@ -616,6 +631,9 @@ mod tests {
             ["Heading", "Para", "Item", "Item", "Item", "Para", "Code", "Table", "Image", "Rule"]
         );
         assert_eq!(p.links, ["https://a.b"]);
+        let t = parse("#Kajian hari ini `#bukan`");
+        assert_eq!(t.links, ["tag:#kajian"]);
+        assert_eq!(t.blocks[0].rich.text, "#Kajian hari ini #bukan");
         let para = &p.blocks[1].rich;
         assert!(para
             .spans

@@ -43,6 +43,27 @@ impl Note {
     }
 }
 
+/// Rentang byte tag `#nama` di `s`: `#` di awal teks atau setelah spasi, lalu
+/// huruf/angka/`_-/`. `# Judul` (ada spasi) bukan tag.
+// ponytail: tag di dalam blok kode ikut terhitung saat mencari.
+pub fn tag_spans(s: &str) -> Vec<(usize, usize)> {
+    let tag_char = |c: char| c.is_alphanumeric() || matches!(c, '_' | '-' | '/');
+    let mut out = Vec::new();
+    let mut prev = ' ';
+    for (i, c) in s.char_indices() {
+        if c == '#' && prev.is_whitespace() {
+            let rest = &s[i + 1..];
+            let n = rest.find(|c: char| !tag_char(c)).unwrap_or(rest.len());
+            let n = rest[..n].trim_end_matches(['-', '/']).len();
+            if n > 0 {
+                out.push((i, i + 1 + n));
+            }
+        }
+        prev = c;
+    }
+    out
+}
+
 /// Beberapa baris setelah judul, digabung, untuk daftar catatan.
 pub fn snippet_of(text: &str) -> String {
     let mut out = String::new();
@@ -377,13 +398,19 @@ impl Store {
         let terms: Vec<&str> = q.split_whitespace().collect();
         let (mut exact, mut fuzzy) = (Vec::new(), Vec::new());
         for (i, n) in self.notes.iter().enumerate() {
-            if terms.iter().all(|t| n.lower.contains(t)) {
+            // `#tag`: catatan yang punya tag itu persis (bukan `#tagging`).
+            let tags: Vec<&str> = tag_spans(&n.lower).into_iter().map(|(a, b)| &n.lower[a..b]).collect();
+            let has = |t: &str| match t.len() > 1 && t.starts_with('#') {
+                true => tags.contains(&t),
+                false => n.lower.contains(t),
+            };
+            if terms.iter().all(|t| has(t)) {
                 exact.push(i);
             } else {
                 let title = title_of(&n.lower);
                 if terms
                     .iter()
-                    .all(|t| n.lower.contains(t) || subseq(t, title))
+                    .all(|t| has(t) || !t.starts_with('#') && subseq(t, title))
                 {
                     fuzzy.push(i);
                 }
@@ -520,6 +547,22 @@ mod tests {
     use super::*;
     use std::fs;
     use std::time::Duration;
+
+    #[test]
+    fn tags() {
+        let dir = std::env::temp_dir().join(format!("tildown-tags-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let mut s = Store::open(dir.clone()).unwrap();
+        let t = s.create("Doa makan #kajian #doa/harian\n\n#kajianku bukan");
+        s.create("lain #kajianku");
+        assert_eq!(s.filter("#kajian").0, vec![t]);
+        assert_eq!(s.filter("#KAJIAN makan"), (vec![t], 1));
+        assert!(s.filter("#kajian lain").0.is_empty(), "kata dicari di catatan bertag saja");
+        assert!(s.filter("#kaj").0.is_empty(), "tag harus persis");
+        assert_eq!(s.filter("#doa/harian").0, vec![t]);
+        assert_eq!(tag_spans("# Judul\na#b #x-, (#y"), vec![(12, 14)]);
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn assets() {
