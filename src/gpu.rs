@@ -69,7 +69,7 @@ struct VO {
 @fragment fn fs(i: VO) -> @location(0) vec4<f32> {
     let t = textureSample(tx, sp, i.uv);
     if (i.m < 0.5) {
-        return vec4<f32>(i.c.rgb, i.c.a * t.r);
+        return vec4<f32>(i.c.rgb, i.c.a * t.a);
     }
     // Gambar disimpan premultiplied (filter linear tanpa halo gelap di tepi
     // transparan); kembalikan ke straight alpha untuk blend biasa.
@@ -320,7 +320,8 @@ impl Gpu {
             clip: [0; 4],
             shot: shot.map(|p| (p, 0)),
         };
-        g.make_tex(ATLAS, ATLAS, wgpu::TextureFormat::R8Unorm, false);
+        // RGBA: glyph biasa = putih × coverage, emoji = warna premultiplied.
+        g.make_tex(ATLAS, ATLAS, wgpu::TextureFormat::Rgba8Unorm, false);
         Ok(g)
     }
 
@@ -493,7 +494,7 @@ impl Gpu {
 
     pub fn finish(&mut self, clear: Rgba, uploads: &mut Vec<Upload>) {
         for u in uploads.drain(..) {
-            self.write(0, u.x, u.y, u.w, u.h, 1, &u.data);
+            self.write(0, u.x, u.y, u.w, u.h, 4, &u.data);
         }
         use wgpu::CurrentSurfaceTexture as Cst;
         let frame = match self.surface.get_current_texture() {

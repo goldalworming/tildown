@@ -56,6 +56,47 @@ pub fn is_arabic(c: char) -> bool {
     matches!(c as u32, 0x0600..=0x06FF | 0x0750..=0x077F | 0x0870..=0x08FF | 0xFB50..=0xFDFF | 0xFE70..=0xFEFF)
 }
 
+/// Twemoji (build COLRv0 Mozilla; gambar CC-BY 4.0): emoji berwarna.
+const EMOJI: &[u8] = include_bytes!("../assets/fonts/Twemoji.Mozilla.ttf");
+
+/// Awal deret emoji (dipakai bila Twemoji punya glyph-nya).
+// ponytail: keycap (1️⃣ #️⃣) tidak dikenali karena diawali huruf ASCII biasa.
+pub fn is_emoji(c: char) -> bool {
+    matches!(c as u32, 0x1F000..=0x1FAFF | 0x2600..=0x27BF | 0x2300..=0x23FF | 0x2B00..=0x2BFF)
+}
+
+/// Lanjutan deret emoji: emoji, ZWJ, pemilih variasi, keycap, tag bendera.
+fn emoji_part(c: char) -> bool {
+    is_emoji(c) || matches!(c as u32, 0x200D | 0xFE0F | 0x20E3 | 0xE0020..=0xE007F)
+}
+
+/// Digambar lewat shaping (DigitalKhatt / Twemoji), bukan per huruf.
+pub fn needs_shaping(c: char) -> bool {
+    is_arabic(c) || is_emoji(c)
+}
+
+/// Lapisan COLRv0 satu emoji: (glyph, warna).
+#[derive(Default)]
+struct Layers(Vec<(u16, [u8; 4])>, u16);
+
+impl<'a> rustybuzz::ttf_parser::colr::Painter<'a> for Layers {
+    fn outline_glyph(&mut self, g: rustybuzz::ttf_parser::GlyphId) {
+        self.1 = g.0;
+    }
+    fn paint(&mut self, p: rustybuzz::ttf_parser::colr::Paint<'a>) {
+        if let rustybuzz::ttf_parser::colr::Paint::Solid(c) = p {
+            self.0.push((self.1, [c.red, c.green, c.blue, c.alpha]));
+        }
+    }
+    fn push_clip(&mut self) {}
+    fn push_clip_box(&mut self, _: rustybuzz::ttf_parser::colr::ClipBox) {}
+    fn pop_clip(&mut self) {}
+    fn push_layer(&mut self, _: rustybuzz::ttf_parser::colr::CompositeMode) {}
+    fn pop_layer(&mut self) {}
+    fn push_transform(&mut self, _: rustybuzz::ttf_parser::Transform) {}
+    fn pop_transform(&mut self) {}
+}
+
 /// Satu glyph hasil shaping: id, cluster (byte relatif kata), advance dan
 /// offset dalam piksel (dy ke atas).
 #[derive(Clone, Copy)]
@@ -108,6 +149,8 @@ pub struct Glyph {
     pub left: f32,
     /// Jarak dari baseline ke tepi atas bitmap.
     pub top: f32,
+    /// Emoji berwarna (RGBA premultiplied), bukan coverage.
+    pub color: bool,
 }
 
 pub struct Upload {
@@ -122,10 +165,13 @@ pub struct Fonts {
     faces: Vec<FontVec>,
     ar: FontRef<'static>,
     hb: rustybuzz::Face<'static>,
-    /// Kata Arab yang sudah di-shape, per ukuran.
-    // ponytail: tidak pernah dikosongkan; sebesar kosakata Arab yang pernah tampil.
-    shaped: HashMap<(u16, String), Vec<Shaped>>,
+    emo: FontRef<'static>,
+    emo_hb: rustybuzz::Face<'static>,
+    /// Kata Arab / deret emoji yang sudah di-shape, per ukuran.
+    // ponytail: tidak pernah dikosongkan; sebesar kosakata yang pernah tampil.
+    shaped: HashMap<(bool, u16, String), Vec<Shaped>>,
     ar_glyphs: HashMap<(u16, u16), Option<Glyph>>,
+    emo_glyphs: HashMap<(u16, u16), Option<Glyph>>,
     glyphs: HashMap<(Face, u16, char), Option<Glyph>>,
     advs: HashMap<(Face, u16, char), f32>,
     /// (x, y, tinggi baris) rak atlas yang sedang diisi.
@@ -224,8 +270,11 @@ impl Fonts {
             faces,
             ar: FontRef::try_from_slice(KHATT).expect("DigitalKhatt"),
             hb: rustybuzz::Face::from_slice(KHATT, 0).expect("DigitalKhatt"),
+            emo: FontRef::try_from_slice(EMOJI).expect("Twemoji"),
+            emo_hb: rustybuzz::Face::from_slice(EMOJI, 0).expect("Twemoji"),
             shaped: HashMap::new(),
             ar_glyphs: HashMap::new(),
+            emo_glyphs: HashMap::new(),
             glyphs: HashMap::new(),
             advs: HashMap::new(),
             pen: (0, 0, 0),
@@ -248,13 +297,14 @@ impl Fonts {
     pub fn reset(&mut self) {
         self.glyphs.clear();
         self.ar_glyphs.clear();
+        self.emo_glyphs.clear();
         self.uploads.clear();
         self.uploads.push(Upload {
             x: 0,
             y: 0,
             w: WHITE,
             h: WHITE,
-            data: vec![255; (WHITE * WHITE) as usize],
+            data: vec![255; (WHITE * WHITE * 4) as usize],
         });
         self.pen = (WHITE + 1, 0, WHITE);
     }
@@ -299,7 +349,7 @@ impl Fonts {
             return g;
         }
         let font = &self.faces[f as usize];
-        let g = self.place(raster(font, font.glyph_id(c), self.scale(f, k.1)));
+        let g = self.place(raster(font, font.glyph_id(c), self.scale(f, k.1)), false);
         self.glyphs.insert(k, g);
         g
     }
@@ -312,9 +362,63 @@ impl Fonts {
         }
         let f = &self.ar;
         let scale = PxScale::from(k.0 as f32 * f.height_unscaled() / f.units_per_em().unwrap_or(1000.0));
-        let g = self.place(raster(f, GlyphId(gid), scale));
+        let g = self.place(raster(f, GlyphId(gid), scale), false);
         self.ar_glyphs.insert(k, g);
         g
+    }
+
+    /// Emoji berwarna menurut id (hasil shaping): lapisan COLR ditumpuk,
+    /// disimpan premultiplied.
+    fn emoji_glyph(&mut self, px: f32, gid: u16) -> Option<Glyph> {
+        let k = (key_px(px), gid);
+        if let Some(&g) = self.emo_glyphs.get(&k) {
+            return g;
+        }
+        let f = &self.emo;
+        let scale = PxScale::from(k.0 as f32 * f.height_unscaled() / f.units_per_em().unwrap_or(1000.0));
+        let mut ls = Layers::default();
+        let id = rustybuzz::ttf_parser::GlyphId(gid);
+        let black = rustybuzz::ttf_parser::RgbaColor::new(0, 0, 0, 255);
+        if self.emo_hb.paint_color_glyph(id, 0, black, &mut ls).is_none() {
+            ls.0 = vec![(gid, [0, 0, 0, 255])];
+        }
+        let os: Vec<_> = ls
+            .0
+            .iter()
+            .filter_map(|&(g, c)| Some((f.outline_glyph(GlyphId(g).with_scale_and_position(scale, point(0.0, 0.0)))?, c)))
+            .collect();
+        let bitmap = os.iter().map(|o| o.0.px_bounds()).reduce(|a, b| ab_glyph::Rect {
+            min: point(a.min.x.min(b.min.x), a.min.y.min(b.min.y)),
+            max: point(a.max.x.max(b.max.x), a.max.y.max(b.max.y)),
+        });
+        let bitmap = bitmap.map(|u| {
+            let (w, h) = (u.width() as u32, u.height() as u32);
+            let mut px = vec![0f32; (w * h * 4) as usize];
+            for (o, c) in &os {
+                let b = o.px_bounds();
+                let (ox, oy) = ((b.min.x - u.min.x) as u32, (b.min.y - u.min.y) as u32);
+                o.draw(|x, y, cov| {
+                    let i = (((y + oy) * w + x + ox) * 4) as usize;
+                    let a = cov.clamp(0.0, 1.0) * c[3] as f32 / 255.0;
+                    if let Some(d) = px.get_mut(i..i + 4) {
+                        for (n, d) in d.iter_mut().enumerate() {
+                            let s = if n == 3 { 1.0 } else { c[n] as f32 / 255.0 };
+                            *d = s * a + *d * (1.0 - a);
+                        }
+                    }
+                });
+            }
+            let data = px.iter().map(|v| (v * 255.0).round() as u8).collect();
+            (w, h, u.min.x, -u.min.y, data)
+        });
+        let g = self.place(bitmap, true);
+        self.emo_glyphs.insert(k, g);
+        g
+    }
+
+    /// Twemoji punya glyph untuk `c`.
+    fn has_emoji(&self, c: char) -> bool {
+        self.emo.glyph_id(c).0 != 0
     }
 
     /// Glyph untuk `g` di layout (huruf biasa atau hasil shaping) dan geser
@@ -322,23 +426,28 @@ impl Fonts {
     pub fn glyph_g(&mut self, st: &Style, g: &G) -> Option<(Glyph, f32, f32)> {
         match g.ar {
             Some((0, ..)) => None,
+            Some((gid, dx, dy)) if g.emoji => self.emoji_glyph(st.px, gid).map(|gl| (gl, dx, dy)),
             Some((gid, dx, dy)) => self.ar_glyph(st.px, gid).map(|gl| (gl, dx, dy)),
             None if g.c.is_whitespace() => None,
             None => self.glyph(st.face, st.px, g.c).map(|gl| (gl, 0.0, 0.0)),
         }
     }
 
-    /// Shape satu kata Arab (kanan-ke-kiri); glyph urut visual, kiri ke kanan.
-    fn shape_ar(&mut self, px: f32, word: &str) -> Vec<Shaped> {
-        let k = (key_px(px * AR_SCALE), word.to_owned());
+    /// Shape satu kata Arab (kanan-ke-kiri) atau deret emoji; glyph urut
+    /// visual, kiri ke kanan.
+    fn shape(&mut self, emoji: bool, px: f32, word: &str) -> Vec<Shaped> {
+        let k = (emoji, key_px(if emoji { px } else { px * AR_SCALE }), word.to_owned());
         if let Some(v) = self.shaped.get(&k) {
             return v.clone();
         }
+        let hb = if emoji { &self.emo_hb } else { &self.hb };
         let mut buf = rustybuzz::UnicodeBuffer::new();
         buf.push_str(word);
-        buf.set_direction(rustybuzz::Direction::RightToLeft);
-        let out = rustybuzz::shape(&self.hb, &[], buf);
-        let u = k.0 as f32 / self.hb.units_per_em() as f32;
+        if !emoji {
+            buf.set_direction(rustybuzz::Direction::RightToLeft);
+        }
+        let out = rustybuzz::shape(hb, &[], buf);
+        let u = k.1 as f32 / hb.units_per_em() as f32;
         let mut v: Vec<Shaped> = out
             .glyph_infos()
             .iter()
@@ -353,7 +462,7 @@ impl Fonts {
             .collect();
         // Tanda tanpa huruf induk (waqaf ۚ ۖ di antara spasi): font memberi
         // lebar 0 sehingga menimpa huruf tetangga; beri ruang selebar gambarnya.
-        if v.iter().all(|g| g.adv == 0.0) {
+        if !emoji && v.iter().all(|g| g.adv == 0.0) {
             for g in &mut v {
                 if let Some(b) = self.hb.glyph_bounding_box(rustybuzz::ttf_parser::GlyphId(g.gid)) {
                     (g.dx, g.adv) = (-b.x_min as f32 * u, (b.x_max - b.x_min) as f32 * u);
@@ -364,8 +473,9 @@ impl Fonts {
         v
     }
 
-    /// Simpan bitmap ke atlas.
-    fn place(&mut self, bitmap: Option<(u32, u32, f32, f32, Vec<u8>)>) -> Option<Glyph> {
+    /// Simpan bitmap ke atlas RGBA: coverage (`color` = false, diwarnai saat
+    /// digambar) atau RGBA premultiplied.
+    fn place(&mut self, bitmap: Option<(u32, u32, f32, f32, Vec<u8>)>, color: bool) -> Option<Glyph> {
         match bitmap {
             Some((w, h, ..)) if w == 0 || h == 0 || w >= ATLAS || h >= ATLAS => None,
             None => None,
@@ -387,7 +497,9 @@ impl Fonts {
                     h,
                     left,
                     top,
+                    color,
                 };
+                let data = if color { data } else { data.iter().flat_map(|&a| [255, 255, 255, a]).collect() };
                 self.uploads.push(Upload {
                     x: g.x,
                     y: g.y,
@@ -429,6 +541,8 @@ pub struct G {
     /// Glyph hasil shaping Arab: (id, dx, dy ke atas). Id 0 = huruf yang
     /// sudah tergambar oleh glyph lain (ligatur, harakat dalam cluster).
     pub ar: Option<(u16, f32, f32)>,
+    /// Glyph `ar` dari Twemoji, bukan DigitalKhatt.
+    pub emoji: bool,
     /// Kata hasil shaping (1, 2, …) — satu unit saat diurutkan kanan-ke-kiri.
     pub w: u32,
     /// Tampil kanan-ke-kiri: cursor di sisi kanan glyph.
@@ -444,6 +558,7 @@ impl G {
             adv,
             st: st as u16,
             ar: None,
+            emoji: false,
             w: 0,
             r: false,
         }
@@ -641,29 +756,33 @@ pub fn layout(f: &mut Fonts, text: &str, runs: &[(usize, Style)], width: f32, lh
             (row_start, x, brk) = (i + 1, 0.0, None);
             continue;
         }
-        if is_arabic(c) {
-            // Satu kata: huruf Arab berurutan dalam gaya yang sama.
+        let emoji = is_emoji(c) && f.has_emoji(c);
+        if is_arabic(c) || emoji {
+            // Satu kata: huruf Arab (atau deret emoji) berurutan dalam gaya yang sama.
             let run_end = if r + 1 < runs.len() { runs[r].0 } else { text.len() };
             let mut j = i + c.len_utf8();
             while let Some(&(k, d)) = it.peek() {
-                if k >= run_end || !is_arabic(d) {
+                if k >= run_end || !(if emoji { emoji_part(d) } else { is_arabic(d) }) {
                     break;
                 }
                 j = k + d.len_utf8();
                 it.next();
             }
-            let sh = f.shape_ar(st.px, &text[i..j]);
+            let sh = f.shape(emoji, st.px, &text[i..j]);
             let ww: f32 = sh.iter().map(|g| g.adv).sum();
             if x + ww > width && !gs.is_empty() {
                 wrap(&mut rows, &mut gs, &mut brk, &mut row_start, &mut x, i);
             }
+            // Emoji bukan kata kanan-ke-kiri (w = 0): ikut arah tetangganya.
             word += 1;
+            let word = if emoji { 0 } else { word };
             let mut pen = x;
             let mut at: Vec<(usize, f32)> = Vec::new(); // (cluster, x) glyph pertama tiap cluster
             for g in &sh {
                 let ch = text[i + g.cl..].chars().next().unwrap_or(' ');
                 gs.push(G {
                     ar: Some((g.gid, g.dx, g.dy)),
+                    emoji,
                     w: word,
                     ..G::new(i + g.cl, ch, pen, g.adv, r)
                 });
@@ -679,6 +798,7 @@ pub fn layout(f: &mut Fonts, text: &str, runs: &[(usize, Style)], width: f32, lh
                     let px = at.iter().filter(|a| a.0 < k).max_by_key(|a| a.0).map_or(x, |a| a.1);
                     gs.push(G {
                         ar: Some((0, 0.0, 0.0)),
+                        emoji,
                         w: word,
                         ..G::new(i + k, ch, px, 0.0, r)
                     });
@@ -819,6 +939,18 @@ impl Lay {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn emoji_sequence_is_one_color_glyph() {
+        let Ok(mut f) = Fonts::load() else { return };
+        let st = Style::new(Face::Regular, 16.0, [0.0; 4]);
+        let text = "a 👨‍👩‍👧 🇮🇩 b";
+        let lay = layout(&mut f, text, &[(text.len(), st)], f32::INFINITY, 1.0);
+        let drawn: Vec<_> = lay.rows[0].gs.iter().filter(|g| g.emoji && g.ar.is_some_and(|a| a.0 != 0)).collect();
+        assert_eq!(drawn.len(), 2, "keluarga (ZWJ) dan bendera masing-masing satu glyph");
+        assert!(f.glyph_g(&st, drawn[0]).is_some_and(|g| g.0.color));
+        assert!(lay.rows[0].gs.iter().map(|g| g.i).collect::<std::collections::HashSet<_>>().len() == text.chars().count());
+    }
 
     #[test]
     fn arabic_is_shaped_and_ordered_right_to_left() {

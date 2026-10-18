@@ -1519,7 +1519,7 @@ impl P<'_> {
 
     /// Satu baris dari potongan (teks, face, warna); "…" bila melebihi `max_w`.
     fn parts(&mut self, x: f32, base: f32, px: f32, parts: &[(&str, Face, Rgba)], max_w: f32) {
-        if parts.iter().any(|p| p.0.chars().any(crate::text::is_arabic)) {
+        if parts.iter().any(|p| p.0.chars().any(crate::text::needs_shaping)) {
             self.shaped_line(x, base, px, parts, max_w);
             return;
         }
@@ -1567,7 +1567,11 @@ impl P<'_> {
                 (gl.x + gl.w) as f32 / a,
                 (gl.y + gl.h) as f32 / a,
             ];
-            self.g.quad(0, r, uv, c, 0.0);
+            if gl.color {
+                self.g.quad(0, r, uv, [1.0, 1.0, 1.0, c[3]], 1.0);
+            } else {
+                self.g.quad(0, r, uv, c, 0.0);
+            }
         }
     }
 
@@ -1582,7 +1586,7 @@ impl P<'_> {
         c: Rgba,
         max_w: f32,
     ) -> f32 {
-        if s.chars().any(crate::text::is_arabic) {
+        if s.chars().any(crate::text::needs_shaping) {
             return self.shaped_line(x, base, px, &[(s, face, c)], max_w);
         }
         let limit = if self.f.width(face, px, s) > max_w {

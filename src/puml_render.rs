@@ -118,7 +118,7 @@ pub fn render_png(src: &str, out: &str, k: f32) -> Result<(), String> {
         .sum::<usize>()
         .max(1);
     let mut img = vec![[1.0f32, 1.0, 1.0]; w * h];
-    let mut atlas = vec![0u8; (ATLAS * ATLAS) as usize];
+    let mut atlas = vec![0u8; (ATLAS * ATLAS * 4) as usize];
     let mut oy = 0.0;
     for (lays, pl) in &pages {
         let mut mesh = vector::Mesh::new();
@@ -195,7 +195,7 @@ impl Canvas {
             img: vec![[bg[0], bg[1], bg[2]]; w * h],
             w,
             h,
-            atlas: vec![0u8; (ATLAS * ATLAS) as usize],
+            atlas: vec![0u8; (ATLAS * ATLAS * 4) as usize],
         }
     }
 
@@ -282,9 +282,9 @@ fn text(
             };
             for u in f.uploads.drain(..) {
                 for yy in 0..u.h {
-                    let row = ((u.y + yy) * ATLAS + u.x) as usize;
-                    atlas[row..row + u.w as usize]
-                        .copy_from_slice(&u.data[(yy * u.w) as usize..((yy + 1) * u.w) as usize]);
+                    let row = ((u.y + yy) * ATLAS + u.x) as usize * 4;
+                    atlas[row..row + u.w as usize * 4]
+                        .copy_from_slice(&u.data[(yy * u.w * 4) as usize..((yy + 1) * u.w * 4) as usize]);
                 }
             }
             let (gx, gy) = (
@@ -297,7 +297,8 @@ fn text(
                     if px < 0 || py < 0 || px >= w as i64 || py >= h as i64 {
                         continue;
                     }
-                    let a = atlas[((gl.y as i64 + yy) * ATLAS as i64 + gl.x as i64 + xx) as usize]
+                    // ponytail: emoji di diagram satu warna (alfa saja).
+                    let a = atlas[((gl.y as i64 + yy) * ATLAS as i64 + gl.x as i64 + xx) as usize * 4 + 3]
                         as f32
                         / 255.0;
                     blend(&mut img[py as usize * w + px as usize], st.color, a);
