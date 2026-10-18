@@ -34,6 +34,16 @@ Download `TilDown-<version>-setup.exe` from [Releases](https://github.com/goldal
 
 Notes are kept in `Documents\TilDown`, and uninstalling does not delete them.
 
+## Install on macOS
+
+Download `TilDown-<version>-macos.dmg` from [Releases](https://github.com/goldalworming/tildown/releases/latest), open it, and drag **TilDown** into **Applications**. The app runs on both Apple Silicon and Intel Macs with macOS 11 or later.
+
+The app is not signed with an Apple Developer certificate, so macOS blocks it the first time you open it. To allow it, go to **System Settings → Privacy & Security** and click **Open Anyway**. You can also run this in Terminal:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/TilDown.app
+```
+
 ## Install on your phone
 
 The web version is a Progressive Web App (PWA), so you can install it like a regular app:
@@ -113,7 +123,7 @@ Set `MARKDOWN_DIR=<path>` to use a different notes folder.
 
 ### Release
 
-Push a tag (`git tag v0.1.0 && git push origin v0.1.0`). The **Release** workflow builds the Windows installer with [Inno Setup](https://jrsoftware.org/isinfo.php) (`installer/tildown.iss`) and publishes it with a portable exe.
+Push a tag (`git tag v0.1.0 && git push origin v0.1.0`). The **Release** workflow builds a Windows installer with [Inno Setup](https://jrsoftware.org/isinfo.php) (`installer/tildown.iss`), a portable exe, and a macOS `.dmg` (universal), then publishes all three.
 
 ### Web
 

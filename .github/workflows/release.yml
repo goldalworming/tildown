@@ -1,6 +1,7 @@
 name: Release
 
-# Push a tag such as v0.1.0 to build the Windows installer and publish a GitHub release.
+# Push a tag such as v0.1.0 to build the Windows installer and the macOS app,
+# then publish both as a GitHub release.
 on:
   push:
     tags: ['v*']
@@ -24,7 +25,70 @@ jobs:
           & $iscc /Q "/DVersion=$v" installer\tildown.iss
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           Copy-Item target\release\tildown.exe "target\installer\TilDown-$v-portable.exe"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: target/installer/*.exe
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - run: |
+          cargo build --release --locked --target aarch64-apple-darwin
+          cargo build --release --locked --target x86_64-apple-darwin
+      - name: App bundle and dmg
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          app=dist/TilDown.app
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          lipo -create -output "$app/Contents/MacOS/tildown" \
+            target/aarch64-apple-darwin/release/tildown target/x86_64-apple-darwin/release/tildown
+          set=dist/tildown.iconset; mkdir -p $set
+          for s in 16 32 128 256 512; do
+            sips -z $s $s web/icons/icon-512.png --out $set/icon_${s}x${s}.png >/dev/null
+            sips -z $((s*2)) $((s*2)) web/icons/icon-512.png --out $set/icon_${s}x${s}@2x.png >/dev/null
+          done
+          iconutil -c icns $set -o "$app/Contents/Resources/tildown.icns"
+          cat > "$app/Contents/Info.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleName</key><string>TilDown</string>
+            <key>CFBundleDisplayName</key><string>TilDown</string>
+            <key>CFBundleIdentifier</key><string>io.github.goldalworming.tildown</string>
+            <key>CFBundleExecutable</key><string>tildown</string>
+            <key>CFBundleIconFile</key><string>tildown</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>$v</string>
+            <key>CFBundleVersion</key><string>$v</string>
+            <key>LSMinimumSystemVersion</key><string>11.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict></plist>
+          EOF
+          # Tanpa sertifikat Apple: tanda tangan ad-hoc (wajib di Apple Silicon).
+          codesign --force --deep -s - "$app"
+          ln -s /Applications dist/Applications
+          rm -r $set
+          hdiutil create -volname TilDown -srcfolder dist -ov -format UDZO "TilDown-$v-macos.dmg"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: '*.dmg'
+
+  release:
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
-          files: target/installer/*.exe
+          files: |
+            *.exe
+            *.dmg
           generate_release_notes: true
