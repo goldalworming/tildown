@@ -57,6 +57,8 @@ pub enum Ev {
     /// Tag rilis terbaru di GitHub (desktop).
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     Update(Result<String, String>),
+    /// Jawaban `/share` (true) atau `/unshare` untuk catatan id.
+    Share(String, bool, Result<String, String>),
     /// Keyboard layar (web): 1 = preedit, 2 = teks, 3 = Enter, 4 = Backspace;
     /// 5 = isi berkas markdown yang di-drop.
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
@@ -209,6 +211,10 @@ enum Btn {
     /// Salin kode koneksi (URL + token) untuk perangkat lain / tempel lalu connect.
     CopyCode,
     PasteCode,
+    /// Toolbar: bagikan catatan (link baru), salin link, berhenti membagikan.
+    Share,
+    CopyLink,
+    Unshare,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1881,6 +1887,9 @@ pub struct App {
     /// Cek update: sedang berjalan / tag rilis terbaru.
     upd_busy: bool,
     upd: Option<Result<String, String>>,
+    share_busy: bool,
+    /// Pesan biasa di toolbar (bukan galat), hilang saat mengetik/pindah catatan.
+    notice: String,
     focused: bool,
     tap: Option<Tap>,
     /// Keyboard layar sedang dibutuhkan (web; lihat `kb_wanted`).
@@ -2021,6 +2030,8 @@ impl App {
             sync_msg: None,
             upd_busy: false,
             upd: None,
+            share_busy: false,
+            notice: String::new(),
             focused: true,
             tap: None,
             kb_on: false,
@@ -2052,6 +2063,7 @@ impl App {
 
     fn load(&mut self, i: usize) {
         self.cur = i;
+        self.notice.clear();
         self.doc = Doc::new(&self.store.notes[i].text);
         self.doc.set_cursor(0, false);
         self.saved_ver = self.doc.version;
@@ -2177,6 +2189,7 @@ impl App {
                 self.saved_ver = self.doc.version;
                 self.dirty_since = None;
                 self.status.clear();
+                self.notice.clear();
                 self.sync_soon();
             }
             Err(e) => {
@@ -2365,6 +2378,61 @@ impl App {
         self.redraw();
     }
 
+    /// Ikon dan label tombol share.
+    fn share_look(&self, b: Btn) -> (&'static str, &'static str) {
+        match b {
+            Btn::CopyLink => ("link", "Copy link"),
+            Btn::Unshare => ("link-2-off", if self.share_busy { "Stopping…" } else { "Unshare" }),
+            _ => ("share-2", if self.share_busy { "Sharing…" } else { "Share" }),
+        }
+    }
+
+    /// Bagikan catatan ini (link baru; link lama, kalau ada, mati) atau
+    /// berhenti membagikan. Isi link selalu versi terakhir yang ter-sync.
+    fn share(&mut self, on: bool) {
+        if self.share_busy {
+            return;
+        }
+        let Some(proxy) = self.proxy.clone() else { return };
+        self.save_now();
+        if on && !self.store.notes[self.cur].on_disk {
+            self.status = "Write something before sharing".into();
+            return;
+        }
+        let id = self.store.notes[self.cur].id.clone();
+        self.share_busy = true;
+        self.sync_start(); // isi catatan sampai di server secepatnya
+        let body = serde_json::json!({ "note": id }).to_string();
+        sync::post(self.sync.share_endpoint(on), self.sync.token.clone(), body, move |r| {
+            let _ = proxy.send_event(Ev::Share(id, on, r));
+        });
+    }
+
+    fn share_done(&mut self, id: String, on: bool, r: Result<String, String>) {
+        self.share_busy = false;
+        let sid = r.and_then(|b| {
+            let v: serde_json::Value = serde_json::from_str(&b).map_err(|e| e.to_string())?;
+            Ok(v["sid"].as_str().unwrap_or_default().to_owned())
+        });
+        match sid {
+            Ok(sid) if on && !sid.is_empty() => {
+                self.sync.shares.insert(id.clone(), sid);
+                if let Some(u) = self.sync.share_url(&id) {
+                    clip_set(&u);
+                }
+                self.notice = "Link copied. Anyone with the link can read this note.".into();
+            }
+            Ok(_) if !on => {
+                self.sync.shares.remove(&id);
+                self.notice = "Sharing stopped. The old link no longer works.".into();
+            }
+            Ok(_) => self.status = "Couldn't share: bad reply".into(),
+            // Server lama tanpa /share.
+            Err(e) if e.starts_with("404") => self.status = "Update your sync server to share notes".into(),
+            Err(e) => self.status = format!("Couldn't share: {e}"),
+        }
+    }
+
     fn update_label(&self) -> &'static str {
         match &self.upd {
             _ if cfg!(target_arch = "wasm32") => "Update",
@@ -2534,8 +2602,17 @@ impl App {
         // Kanan: [ikon 16 + 6 + label], padding 10 / 12.
         let px = 14.0 * s;
         let mut x = w - 16.0 * s;
-        for (b, label) in [(Btn::Delete, "Delete"), (Btn::Mode, self.mode_label())] {
-            let bw = (28.0 + 16.0) * s + self.tw(Face::Medium, px, label);
+        let mut bs = vec![(Btn::Delete, "Delete"), (Btn::Mode, self.mode_label())];
+        if self.sync.on() {
+            match self.sync.shares.contains_key(&self.store.notes[self.cur].id) {
+                true => bs.extend([Btn::Unshare, Btn::CopyLink].map(|b| (b, self.share_look(b).1))),
+                false => bs.push((Btn::Share, self.share_look(Btn::Share).1)),
+            }
+        }
+        for (b, label) in bs {
+            // Layar HP: tombol share cukup ikon.
+            let icon_only = self.narrow() && matches!(b, Btn::Share | Btn::CopyLink | Btn::Unshare);
+            let bw = if icon_only { 32.0 * s } else { (28.0 + 16.0) * s + self.tw(Face::Medium, px, label) };
             x -= bw;
             v.push((Rect::new(x.round(), (8.0 * s).round(), bw.round(), (32.0 * s).round()), b));
             x -= 4.0 * s;
@@ -2663,6 +2740,14 @@ impl App {
             Btn::Settings => self.open_settings(0),
             Btn::Mode => self.toggle_mode(),
             Btn::Delete => self.delete_note(),
+            Btn::Share => self.share(true),
+            Btn::Unshare => self.share(false),
+            Btn::CopyLink => {
+                if let Some(u) = self.sync.share_url(&self.store.notes[self.cur].id) {
+                    clip_set(&u);
+                    self.notice = "Link copied".into();
+                }
+            }
             Btn::ZoomOut => self.zoom_by(1.0 / 1.2, cx, cy),
             Btn::ZoomIn => self.zoom_by(1.2, cx, cy),
             Btn::ZoomSave => self.download_view(),
@@ -3913,23 +3998,45 @@ impl App {
                     let base = p.base(Face::Medium, 14.0 * s, r.y, r.h);
                     p.text(r.x + 32.0 * s, base, Face::Medium, 14.0 * s, label, col, f32::INFINITY);
                 }
+                Btn::Share | Btn::CopyLink | Btn::Unshare => {
+                    self.hover_bg(p, r, btn);
+                    let (icon, label) = self.share_look(btn);
+                    let col = if btn == Btn::CopyLink { t.accent } else { t.fg };
+                    if r.w <= 32.0 * s {
+                        p.icon_in(icon, r, 16.0 * s, col);
+                    } else {
+                        p.icon(icon, r.x + 10.0 * s, (r.y + 8.0 * s).round(), 16.0 * s, col);
+                        let base = p.base(Face::Medium, 14.0 * s, r.y, r.h);
+                        p.text(r.x + 32.0 * s, base, Face::Medium, 14.0 * s, label, col, f32::INFINITY);
+                    }
+                }
                 _ => {}
             }
         }
-        // Jumlah kata, atau galat.
+        // Jumlah kata, pesan, atau galat; berhenti sebelum tombol kanan.
         let x = (b.x + 52.0 * s).round();
         let iy = ((b.h - 16.0 * s) / 2.0).round();
-        if self.status.is_empty() {
+        let right = hits
+            .iter()
+            .filter(|h| h.0.y < b.y + b.h && h.0.x > x)
+            .fold(b.x + b.w, |m, h| m.min(h.0.x));
+        let max_w = (right - x - 32.0 * s).max(0.0);
+        if !self.status.is_empty() {
+            p.icon("circle-alert", x, iy, 16.0 * s, t.err);
+            let base = p.base(Face::Medium, 14.0 * s, 0.0, b.h);
+            let st = self.status.clone();
+            p.text(x + 24.0 * s, base, Face::Medium, 14.0 * s, &st, t.err, max_w);
+        } else if !self.notice.is_empty() {
+            p.icon("link", x, iy, 16.0 * s, t.accent);
+            let base = p.base(Face::Regular, 14.0 * s, 0.0, b.h);
+            let st = self.notice.clone();
+            p.text(x + 24.0 * s, base, Face::Regular, 14.0 * s, &st, t.fg, max_w);
+        } else {
             let n = self.word_count();
             let label = format!("{n} {}", if n == 1 { "word" } else { "words" });
             p.icon("file-text", x, iy, 16.0 * s, t.dim);
             let base = p.base(Face::Regular, 14.0 * s, 0.0, b.h);
-            p.text(x + 24.0 * s, base, Face::Regular, 14.0 * s, &label, t.dim, b.w * 0.5);
-        } else {
-            p.icon("circle-alert", x, iy, 16.0 * s, t.err);
-            let base = p.base(Face::Medium, 14.0 * s, 0.0, b.h);
-            let st = self.status.clone();
-            p.text(x + 24.0 * s, base, Face::Medium, 14.0 * s, &st, t.err, b.w * 0.5);
+            p.text(x + 24.0 * s, base, Face::Regular, 14.0 * s, &label, t.dim, max_w);
         }
     }
 
@@ -4621,6 +4728,10 @@ impl ApplicationHandler<Ev> for App {
         let mut g = match ev {
             Ev::Gpu(g) => g,
             Ev::Sync(r) => return self.sync_done(r),
+            Ev::Share(id, on, r) => {
+                self.share_done(id, on, r);
+                return self.redraw();
+            }
             Ev::Update(r) => {
                 (self.upd_busy, self.upd) = (false, Some(r));
                 return self.redraw();

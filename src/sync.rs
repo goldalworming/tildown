@@ -31,6 +31,8 @@ pub struct Sync {
     base: HashMap<String, (i64, u64)>,
     /// Kiriman yang sedang jalan: id → hash teks yang dikirim (0 = hapus).
     sent: HashMap<String, u64>,
+    /// Catatan yang dibagikan: id → id link (`/s/<sid>`), dari server tiap sync.
+    pub shares: HashMap<String, String>,
 }
 
 /// Hasil `apply`.
@@ -127,6 +129,16 @@ impl Sync {
         format!("{}/sync", self.url)
     }
 
+    /// `/share` (link baru; link lama mati) atau `/unshare`.
+    pub fn share_endpoint(&self, on: bool) -> String {
+        format!("{}/{}", self.url, if on { "share" } else { "unshare" })
+    }
+
+    /// Link publik catatan `id` bila sedang dibagikan.
+    pub fn share_url(&self, id: &str) -> Option<String> {
+        self.shares.get(id).map(|sid| format!("{}/s/{sid}", self.url))
+    }
+
     /// Body request: catatan yang berubah sejak sync terakhir.
     pub fn request(&mut self, store: &Store) -> String {
         self.sent.clear();
@@ -192,6 +204,12 @@ impl Sync {
                 continue;
             }
             self.remote(store, id, seq, n["text"].as_str(), &mut out);
+        }
+        if let Some(a) = v["shares"].as_array() {
+            self.shares = a
+                .iter()
+                .filter_map(|s| Some((s["note"].as_str()?.to_owned(), s["sid"].as_str()?.to_owned())))
+                .collect();
         }
         self.cursor = v["cursor"].as_i64().unwrap_or(self.cursor);
         out.more = v["more"].as_bool().unwrap_or(false);
@@ -422,6 +440,21 @@ mod tests {
             b.connect(u, t);
             assert_eq!((b.url.as_str(), b.token.as_str()), (a.url.as_str(), "abc123"));
         }
+    }
+
+    #[test]
+    fn shares() {
+        let mut y = Sync::default();
+        y.connect("https://s.dev", "t");
+        let mut st = device("shares").0;
+        y.apply(&mut st, r#"{"cursor":0,"notes":[],"results":[],"shares":[{"note":"a","sid":"Abc123def456"}]}"#).unwrap();
+        assert_eq!(y.share_url("a").as_deref(), Some("https://s.dev/s/Abc123def456"));
+        assert_eq!(y.share_endpoint(false), "https://s.dev/unshare");
+        // Server lama (tanpa `shares`): daftar tetap.
+        y.apply(&mut st, r#"{"cursor":0,"notes":[],"results":[]}"#).unwrap();
+        assert!(y.share_url("a").is_some());
+        y.apply(&mut st, r#"{"cursor":0,"notes":[],"results":[],"shares":[]}"#).unwrap();
+        assert_eq!(y.share_url("a"), None);
     }
 
     #[test]

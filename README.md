@@ -86,6 +86,16 @@ How syncing works:
 - If the same note was edited on two devices, both versions are kept. The other one appears as a new note titled "… (conflict)".
 - Notes deleted on one device go to the Trash on the others.
 
+### Sharing a note
+
+With sync connected, the toolbar has a **Share** button:
+- **Share** creates a public link such as `https://tildown-sync.<you>.workers.dev/s/k3f9x2qaB7mZ` and copies it. Anyone with the link can read the note in a browser, without the app or a token.
+- The link always shows the latest synced version of the note.
+- **Unshare** stops the link right away. Sharing again makes a new link; old links never come back.
+- Images inside the note are not shown on the shared page yet.
+
+If you deployed the server before sharing existed, update it: in the GitHub repository that the Deploy button created, replace `src/`, `package.json` and `package-lock.json` with the ones from this repo's `server/` folder. Cloudflare redeploys on push.
+
 To deploy by hand instead of using the button:
 
 ```sh

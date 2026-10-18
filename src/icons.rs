@@ -10,13 +10,15 @@ use crate::vector::{self, Pt};
 /// (titik, tertutup?)
 pub type Shape = Vec<(Vec<Pt>, bool)>;
 
-const SRC: [(&str, &str); 20] = [
+const SRC: [(&str, &str); 23] = [
     ("chevron-down", include_str!("../assets/icons/chevron-down.svg")),
     ("chevron-up", include_str!("../assets/icons/chevron-up.svg")),
     ("book-open", include_str!("../assets/icons/book-open.svg")),
     ("circle-alert", include_str!("../assets/icons/circle-alert.svg")),
     ("download", include_str!("../assets/icons/download.svg")),
     ("file-text", include_str!("../assets/icons/file-text.svg")),
+    ("link", include_str!("../assets/icons/link.svg")),
+    ("link-2-off", include_str!("../assets/icons/link-2-off.svg")),
     ("maximize-2", include_str!("../assets/icons/maximize-2.svg")),
     ("minus", include_str!("../assets/icons/minus.svg")),
     ("mouse-pointer-2", include_str!("../assets/icons/mouse-pointer-2.svg")),
@@ -27,6 +29,7 @@ const SRC: [(&str, &str); 20] = [
     ("refresh-cw", include_str!("../assets/icons/refresh-cw.svg")),
     ("search", include_str!("../assets/icons/search.svg")),
     ("settings", include_str!("../assets/icons/settings.svg")),
+    ("share-2", include_str!("../assets/icons/share-2.svg")),
     ("trash-2", include_str!("../assets/icons/trash-2.svg")),
     ("trash", include_str!("../assets/icons/trash.svg")),
     ("undo-2", include_str!("../assets/icons/undo-2.svg")),
