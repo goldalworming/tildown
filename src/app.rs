@@ -54,6 +54,9 @@ const SYNC_POLL: Duration = Duration::from_secs(60);
 pub enum Ev {
     Gpu(Gpu),
     Sync(Result<String, String>),
+    /// Tag rilis terbaru di GitHub (desktop).
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    Update(Result<String, String>),
     /// Keyboard layar (web): 1 = preedit, 2 = teks, 3 = Enter, 4 = Backspace;
     /// 5 = isi berkas markdown yang di-drop.
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
@@ -201,9 +204,22 @@ enum Btn {
     /// Buat token acak (disalin ke clipboard) / buka halaman deploy server.
     GenToken,
     Deploy,
+    /// Cek versi terbaru (desktop) / muat ulang build terbaru (web).
+    Update,
     /// Salin kode koneksi (URL + token) untuk perangkat lain / tempel lalu connect.
     CopyCode,
     PasteCode,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+const RELEASES: &str = "https://github.com/goldalworming/tildown/releases/latest";
+#[cfg(not(target_arch = "wasm32"))]
+const RELEASES_API: &str = "https://api.github.com/repos/goldalworming/tildown/releases/latest";
+
+/// Tag rilis (`v1.2.3`) lebih baru dari versi aplikasi ini.
+fn newer(tag: &str) -> bool {
+    let v = |s: &str| -> Vec<u32> { s.trim_start_matches('v').split('.').map(|x| x.parse().unwrap_or(0)).collect() };
+    v(tag) > v(env!("CARGO_PKG_VERSION"))
 }
 
 /// Tombol "Deploy to Cloudflare" untuk `server/`.
@@ -1858,6 +1874,9 @@ pub struct App {
     sync_edit: Option<usize>,
     /// Petunjuk sesudah Generate (menggantikan status sementara).
     sync_msg: Option<&'static str>,
+    /// Cek update: sedang berjalan / tag rilis terbaru.
+    upd_busy: bool,
+    upd: Option<Result<String, String>>,
     focused: bool,
     tap: Option<Tap>,
     /// Keyboard layar sedang dibutuhkan (web; lihat `kb_wanted`).
@@ -1996,6 +2015,8 @@ impl App {
             sync_in: [Doc::new(&sync.url), Doc::new(&sync.token)],
             sync_edit: None,
             sync_msg: None,
+            upd_busy: false,
+            upd: None,
             focused: true,
             tap: None,
             kb_on: false,
@@ -2340,6 +2361,42 @@ impl App {
         self.redraw();
     }
 
+    fn update_label(&self) -> &'static str {
+        match &self.upd {
+            _ if cfg!(target_arch = "wasm32") => "Update",
+            _ if self.upd_busy => "Checking…",
+            Some(Ok(tag)) if newer(tag) => "Download",
+            _ => "Check for updates",
+        }
+    }
+
+    /// Web: muat ulang build terbaru. Desktop: tanya GitHub rilis terbaru;
+    /// kalau sudah ada yang lebih baru, buka halaman unduhnya.
+    fn update(&mut self) {
+        #[cfg(target_arch = "wasm32")]
+        crate::web::update_app();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if let Some(Ok(tag)) = &self.upd {
+                if newer(tag) {
+                    return open_url(RELEASES);
+                }
+            }
+            let Some(proxy) = self.proxy.clone() else { return };
+            self.upd_busy = true;
+            std::thread::spawn(move || {
+                let r = ureq::get(RELEASES_API)
+                    .header("Accept", "application/vnd.github+json")
+                    .call()
+                    .and_then(|mut r| r.body_mut().read_to_string())
+                    .map_err(|e| e.to_string())
+                    .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).map_err(|e| e.to_string()))
+                    .and_then(|v| v["tag_name"].as_str().map(str::to_owned).ok_or_else(|| "no release".into()));
+                let _ = proxy.send_event(Ev::Update(r));
+            });
+        }
+    }
+
     fn sync_status(&self) -> (String, Rgba) {
         let t = self.theme;
         if self.sync_busy {
@@ -2535,6 +2592,9 @@ impl App {
             row(&mut v, y + 28.0 * s, 3, &|i| Btn::Width(i as u8));
             y += sec;
             row(&mut v, y + 28.0 * s, 2, &|i| Btn::OpenIn(i as u8));
+            // Sebaris dengan teks versi (kotak 20 di y + 28).
+            let uw = (self.tw(Face::Medium, px, self.update_label()) + 32.0 * s).round();
+            v.push((Rect::new(bx + bw - uw, (y + sec + 20.0 * s).round(), uw, (36.0 * s).round()), Btn::Update));
         } else if self.settings == Some(2) {
             // Teks pembuka 2 baris, lalu dua isian (judul 20 + 8 + 36) — token
             // dulu, lalu URL — masing-masing dengan tombol di kanan, lalu tombol.
@@ -2616,6 +2676,7 @@ impl App {
             Btn::FsUp => self.fs = (self.fs + 1.0).min(24.0),
             Btn::Width(i) => self.col = WIDTHS[i as usize],
             Btn::OpenIn(i) => self.open_in = if i == 0 { Mode::Edit } else { Mode::Read },
+            Btn::Update => self.update(),
             Btn::EmptyTrash => {
                 for t in std::mem::take(&mut self.trash) {
                     let _ = self.store.purge(&t.name);
@@ -4067,8 +4128,19 @@ impl App {
             p.center(Rect::new(bx + 44.0 * s, fy, 64.0 * s, 36.0 * s), Face::Mono, px, &fs, t.fg);
             let vy = y0 + 4.0 * 88.0 * s + 28.0 * s;
             let b = p.base(Face::Regular, px, vy, 20.0 * s);
-            let v = concat!("TilDown v", env!("CARGO_PKG_VERSION"));
-            p.text(bx, b, Face::Regular, px, v, t.dim, bw);
+            let mut v = concat!("TilDown v", env!("CARGO_PKG_VERSION")).to_owned();
+            let mut vc = t.dim;
+            match &self.upd {
+                Some(Ok(tag)) if newer(tag) => {
+                    v += &format!(" · {tag} available");
+                    vc = t.accent;
+                }
+                Some(Ok(_)) => v += " · up to date",
+                Some(Err(_)) => v += " · couldn't check",
+                None => {}
+            }
+            let uw = hits.iter().find(|h| h.1 == Btn::Update).map_or(0.0, |h| h.0.w);
+            p.text(bx, b, Face::Regular, px, &v, vc, bw - uw - 8.0 * s);
         } else if self.settings == Some(2) {
             let (intro, top) = sync_intro(p.f, s, bw);
             for (k, l) in intro.iter().enumerate() {
@@ -4159,6 +4231,11 @@ impl App {
                         let cw = (1.5 * s).round().max(1.0);
                         p.rect(Rect::new(cx.min(tx + tw).round(), r.y + 9.0 * s, cw, r.h - 18.0 * s), t.fg);
                     }
+                }
+                Btn::Update => {
+                    self.hover_bg(p, r, b);
+                    p.rframe(r, 6.0 * s, lw, if hot { t.dim } else { t.border });
+                    p.center(r, Face::Medium, px, self.update_label(), t.fg);
                 }
                 Btn::GenToken | Btn::Deploy => {
                     self.hover_bg(p, r, b);
@@ -4525,6 +4602,10 @@ impl ApplicationHandler<Ev> for App {
         let mut g = match ev {
             Ev::Gpu(g) => g,
             Ev::Sync(r) => return self.sync_done(r),
+            Ev::Update(r) => {
+                (self.upd_busy, self.upd) = (false, Some(r));
+                return self.redraw();
+            }
             Ev::Kb(5, s) => return self.import_note(&s),
             Ev::Kb(6, s) => return self.paste_text(s),
             Ev::Kb(7, s) => return self.paste_code(s),
@@ -4693,6 +4774,14 @@ mod tests {
     use super::*;
 
     /// Download diagram: PlantUML dan Mermaid jadi PNG yang bisa dibaca lagi.
+    #[test]
+    fn update_versions() {
+        assert!(newer("v99.0.0"));
+        assert!(!newer(concat!("v", env!("CARGO_PKG_VERSION"))));
+        assert!(!newer("v0.0.9"));
+        assert!(newer(&format!("v{}.10", env!("CARGO_PKG_VERSION").rsplit_once('.').unwrap().0))); // .10 > .2, bukan urut huruf
+    }
+
     #[test]
     fn diagram_download_png() {
         let cases = [

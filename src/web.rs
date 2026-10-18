@@ -55,6 +55,14 @@ export function opfs_untrash(name, to, text) {
   run(async () => { await put(dir, to, text); await (await trashDir()).removeEntry(name); });
 }
 export function opfs_purge(name) { run(async () => (await trashDir()).removeEntry(name)); }
+// "Update": ambil build terbaru dari server, bukan dari cache service worker.
+export async function update_app() {
+  try {
+    await (await navigator.serviceWorker?.getRegistration())?.update();
+    for (const k of await caches.keys()) await caches.delete(k);
+  } catch (e) { console.error('TilDown: update', e); }
+  location.reload();
+}
 export function open_url(u) { window.open(u, '_blank', 'noopener'); }
 export function clip_write(t) { navigator.clipboard?.writeText(t).catch(() => {}); }
 export function log_error(m) { console.error(m); document.title = 'TilDown — galat'; }
@@ -155,6 +163,7 @@ extern "C" {
     fn opfs_untrash(name: &str, to: &str, text: &str);
     fn opfs_purge(name: &str);
     pub fn open_url(u: &str);
+    pub fn update_app();
     pub fn clip_write(t: &str);
     pub fn log_error(m: &str);
     pub fn download(name: &str, bytes: &[u8]);
