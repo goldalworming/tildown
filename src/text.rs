@@ -657,7 +657,22 @@ fn em_scale(font: &impl Font, px: u16) -> PxScale {
 
 /// Coverage 8-bit glyph: (lebar, tinggi, kiri, atas dari baseline, data).
 fn raster(font: &impl Font, id: GlyphId, scale: PxScale) -> Option<(u32, u32, f32, f32, Vec<u8>)> {
-    let o = font.outline_glyph(id.with_scale_and_position(scale, point(0.0, 0.0)))?;
+    // Bbox header CFF bisa dibulatkan ke dalam (DigitalKhatt: lām pada lā);
+    // kurva yang keluar kanvas membuat coverage bocor jadi kotak abu-abu.
+    // Hitung bbox dari titik kurva sendiri. (Outline.bounds: min.y = atas.)
+    let mut ol = font.outline(id)?;
+    let ps = ol.curves.iter().flat_map(|c| match *c {
+        ab_glyph::OutlineCurve::Line(a, b) => vec![a, b],
+        ab_glyph::OutlineCurve::Quad(a, b, c) => vec![a, b, c],
+        ab_glyph::OutlineCurve::Cubic(a, b, c, d) => vec![a, b, c, d],
+    });
+    for p in ps {
+        ol.bounds.min.x = ol.bounds.min.x.min(p.x);
+        ol.bounds.max.x = ol.bounds.max.x.max(p.x);
+        ol.bounds.min.y = ol.bounds.min.y.max(p.y);
+        ol.bounds.max.y = ol.bounds.max.y.min(p.y);
+    }
+    let o = ab_glyph::OutlinedGlyph::new(id.with_scale_and_position(scale, point(0.0, 0.0)), ol, font.as_scaled(scale).scale_factor());
     let b = o.px_bounds();
     let (w, h) = (b.width() as u32, b.height() as u32);
     let mut data = vec![0u8; (w * h) as usize];
@@ -1180,4 +1195,12 @@ mod tests {
         assert_eq!(lay.rows.len(), 3);
         assert_eq!(lay.caret(2).1, lay.rows[1].top);
     }
+}
+
+#[test]
+fn khatt_lam_alef_no_box() {
+    let f = FontRef::try_from_slice(KHATT).unwrap();
+    let scale = PxScale::from(40.0 * f.height_unscaled() / f.units_per_em().unwrap());
+    let (w, h, _, _, d) = raster(&f, GlyphId(120), scale).unwrap();
+    assert!(d[0] == 0 && d[(w * h - 1) as usize] < 40, "lām di lā jadi kotak");
 }
