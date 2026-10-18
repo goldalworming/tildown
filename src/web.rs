@@ -84,6 +84,21 @@ export function clip_read() {
 export function clip_paste() {
   navigator.clipboard?.readText().then(t => t && kbCb(6, t), () => {});
 }
+// Tombol back HP/browser: tiap lapisan (catatan di atas daftar, Settings,
+// penampil) = satu entri riwayat. Back menutup lapisan teratas (jenis 8).
+let navDepth = 0, navIgnore = 0;
+export function nav_depth(n) {
+  while (navDepth < n) history.pushState({ d: ++navDepth }, '');
+  if (n < navDepth) { navIgnore++; const k = navDepth - n; navDepth = n; history.go(-k); }
+}
+addEventListener('popstate', (e) => {
+  if (navIgnore) { navIgnore--; return; }
+  const d = e.state?.d ?? 0;
+  if (d > navDepth) { navIgnore++; history.go(navDepth - d); return; } // forward: abaikan
+  const k = navDepth - d;
+  navDepth = d;
+  for (let i = 0; i < k; i++) kbCb?.(8, '');
+});
 export function kb_init(cb) {
   kbCb = cb;
   kb = document.createElement('textarea');
@@ -181,6 +196,7 @@ extern "C" {
     pub fn kb_editing(on: bool);
     pub fn clip_read();
     pub fn clip_paste();
+    pub fn nav_depth(n: u32);
     #[wasm_bindgen(js_name = kb_init)]
     fn kb_init_js(cb: &Closure<dyn FnMut(u8, String)>);
     #[wasm_bindgen(js_name = img_init)]

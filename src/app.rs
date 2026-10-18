@@ -1935,6 +1935,9 @@ pub struct App {
     tap: Option<Tap>,
     /// Keyboard layar sedang dibutuhkan (web; lihat `kb_wanted`).
     kb_on: bool,
+    /// Kedalaman lapisan yang terakhir dilaporkan ke riwayat browser (web).
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    nav: u32,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2072,6 +2075,7 @@ impl App {
             upd_busy: false,
             upd: None,
             share_busy: false,
+            nav: 0,
             glide: None,
             menu: None,
             notice: String::new(),
@@ -3799,6 +3803,26 @@ impl App {
         self.redraw();
     }
 
+    /// Lapisan yang bisa ditutup tombol back: catatan terbuka di atas daftar
+    /// (layar HP), Settings, penampil.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    fn nav_depth(&self) -> u32 {
+        (self.narrow() && !self.side_open) as u32 + self.settings.is_some() as u32 + self.zoom.is_some() as u32
+    }
+
+    /// Tombol back: tutup lapisan teratas.
+    fn back(&mut self) {
+        self.menu = None;
+        if self.zoom.is_some() {
+            self.click(Btn::ZoomClose);
+        } else if self.settings.is_some() {
+            self.click(Btn::SetClose);
+        } else if self.narrow() && !self.side_open {
+            self.save_now();
+            self.side_open = true;
+        }
+    }
+
     /// Klik kanan di isi catatan: taruh kursor di situ (kecuali di dalam
     /// seleksi), lalu buka menu konteks.
     fn right_click(&mut self) {
@@ -5025,6 +5049,10 @@ impl ApplicationHandler<Ev> for App {
             Ev::Kb(5, s) => return self.import_note(&s),
             Ev::Kb(6, s) => return self.paste_text(s),
             Ev::Kb(7, s) => return self.paste_code(s),
+            Ev::Kb(8, _) => {
+                self.back();
+                return self.redraw();
+            }
             Ev::Decoded(src, img) => {
                 if img.is_some() {
                     self.imgs.insert(src, img);
@@ -5081,6 +5109,11 @@ impl ApplicationHandler<Ev> for App {
     }
 
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+        #[cfg(target_arch = "wasm32")]
+        if self.nav_depth() != self.nav {
+            self.nav = self.nav_depth();
+            crate::web::nav_depth(self.nav);
+        }
         let kb = self.kb_wanted();
         if kb != self.kb_on {
             self.kb_on = kb;
