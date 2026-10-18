@@ -371,18 +371,6 @@ fn push_text(r: &mut Rich, links: &mut Vec<String>, s: &str, st: Inl) {
     if st.code || st.link.is_some() {
         return r.push(s, st);
     }
-    // Ayat Arab (≥ 3 kata, tanpa huruf Latin) yang menyambung label Latin di
-    // baris yang sama ("**QS …: 49** وَمِنْ …"): mulai baris baru agar rata kanan.
-    let tail = s.rfind(|c: char| c.is_ascii_alphabetic()).map_or(0, |k| k + 1);
-    if let Some(a) = s[tail..].find(crate::text::is_arabic).map(|a| tail + a) {
-        let (head, ar) = (s[..a].trim_end(), &s[a..]);
-        let line = !head.is_empty() || (!r.text.is_empty() && !r.text.ends_with('\n'));
-        if line && ar.split_whitespace().count() >= 3 && !head.ends_with('\n') {
-            push_text(r, links, head, st);
-            r.push("\n", st);
-            return push_text(r, links, ar, st);
-        }
-    }
     let mut spans: Vec<(usize, usize, bool)> = crate::store::tag_spans(s).into_iter().map(|(a, b)| (a, b, false)).collect();
     let urls = url_spans(s);
     spans.retain(|t| !urls.iter().any(|u| t.0 < u.1 && u.0 < t.1)); // `#` di dalam URL
@@ -611,15 +599,6 @@ pub fn parse(src: &str) -> Parsed {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn arabic_after_label_breaks() {
-        let p = parse("> **QS Al-Baqarah [2]: 132** وَوَصَّىٰ بِهَا إِبْرَاهِيمُ بَنِيهِ\n\nkata بِسْمِ اللَّهِ saja");
-        assert!(p.blocks[0].rich.text.contains(": 132\nوَ"));
-        assert!(!p.blocks[1].rich.text.contains('\n'));
-        let p = parse("**QS [3]: 110** (potongan) كُنتُمْ خَيْرَ أُمَّةٍ");
-        assert!(p.blocks[0].rich.text.contains("(potongan)\nكُ"));
-    }
 
     fn spans<'a>(line: &'a str, l: &Line) -> Vec<(&'a str, Tok)> {
         let mut a = 0;
