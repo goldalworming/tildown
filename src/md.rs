@@ -340,17 +340,51 @@ fn flush(cur: &mut Option<Block>, out: &mut Vec<Block>) {
     }
 }
 
-/// Teks dengan tag `#nama` jadi tautan `tag:nama` (klik = cari tag itu).
-fn push_tags(r: &mut Rich, links: &mut Vec<String>, s: &str, st: Inl) {
+/// Ikon setelah tautan web: klik membuka browser.
+const EXT: &str = "\u{a0}↗";
+
+/// URL `http(s)://` polos di `s`: diawali awal teks, spasi, atau `(`; tanda
+/// baca penutup tidak ikut.
+fn url_spans(s: &str) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    for (a, _) in s.match_indices("http") {
+        let rest = &s[a..];
+        let before = s[..a].chars().next_back();
+        if !(rest.starts_with("https://") || rest.starts_with("http://"))
+            || before.is_some_and(|c| !c.is_whitespace() && c != '(')
+            || out.last().is_some_and(|&(_, b)| a < b)
+        {
+            continue;
+        }
+        let n = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let n = rest[..n].trim_end_matches(['.', ',', ';', ':', '!', '?', ')', '\'', '"']).len();
+        if !rest[..n].ends_with("//") {
+            out.push((a, a + n));
+        }
+    }
+    out
+}
+
+/// Teks biasa: tag `#nama` jadi tautan `tag:nama` (klik = cari tag itu), URL
+/// polos jadi tautan + ikon ↗.
+fn push_text(r: &mut Rich, links: &mut Vec<String>, s: &str, st: Inl) {
     if st.code || st.link.is_some() {
         return r.push(s, st);
     }
+    let mut spans: Vec<(usize, usize, bool)> = crate::store::tag_spans(s).into_iter().map(|(a, b)| (a, b, false)).collect();
+    let urls = url_spans(s);
+    spans.retain(|t| !urls.iter().any(|u| t.0 < u.1 && u.0 < t.1)); // `#` di dalam URL
+    spans.extend(urls.into_iter().map(|(a, b)| (a, b, true)));
+    spans.sort();
     let mut last = 0;
-    for (a, b) in crate::store::tag_spans(s) {
+    for (a, b, url) in spans {
         r.push(&s[last..a], st);
-        links.push(format!("tag:{}", s[a..b].to_lowercase()));
+        links.push(if url { s[a..b].to_owned() } else { format!("tag:{}", s[a..b].to_lowercase()) });
         let link = Some((links.len() - 1).min(u16::MAX as usize - 1) as u16);
         r.push(&s[a..b], Inl { link, ..st });
+        if url {
+            r.push(EXT, Inl { link, ..st });
+        }
         last = b;
     }
     r.push(&s[last..], st);
@@ -479,7 +513,17 @@ pub fn parse(src: &str) -> Parsed {
                     TagEnd::Emphasis => st.italic = false,
                     TagEnd::Strong => st.bold = false,
                     TagEnd::Strikethrough => st.strike = false,
-                    TagEnd::Link => st.link = link_stack.pop().flatten(),
+                    TagEnd::Link => {
+                        let web = st.link.and_then(|l| p.links.get(l as usize)).is_some_and(|u| u.starts_with("http"));
+                        if web && image.is_none() {
+                            match (&mut cell, &mut cur) {
+                                (Some(c), _) => c.push(EXT, st),
+                                (None, Some(b)) => b.rich.push(EXT, st),
+                                _ => {}
+                            }
+                        }
+                        st.link = link_stack.pop().flatten();
+                    }
                     TagEnd::Image => {
                         if let Some((src, alt)) = image.take() {
                             if let Some(c) = &mut cell {
@@ -540,10 +584,10 @@ pub fn parse(src: &str) -> Parsed {
         if let Some((_, alt)) = &mut image {
             alt.push_str(&s);
         } else if let Some(c) = &mut cell {
-            push_tags(c, &mut p.links, &s, inl);
+            push_text(c, &mut p.links, &s, inl);
         } else {
             let b = cur.get_or_insert_with(|| block(BKind::Para, lists.len(), quote).unwrap());
-            push_tags(&mut b.rich, &mut p.links, &s, inl);
+            push_text(&mut b.rich, &mut p.links, &s, inl);
         }
     }
     flush(&mut cur, &mut p.blocks);
@@ -633,6 +677,9 @@ mod tests {
         assert_eq!(p.links, ["https://a.b"]);
         let t = parse("#Kajian hari ini `#bukan`");
         assert_eq!(t.links, ["tag:#kajian"]);
+        let u = parse("Lihat https://a.b/c#x, [situs](https://d.e) dan (http://f.g).");
+        assert_eq!(u.links, ["https://a.b/c#x", "https://d.e", "http://f.g"]);
+        assert_eq!(u.blocks[0].rich.text, "Lihat https://a.b/c#x\u{a0}↗, situs\u{a0}↗ dan (http://f.g\u{a0}↗).");
         assert_eq!(t.blocks[0].rich.text, "#Kajian hari ini #bukan");
         let para = &p.blocks[1].rich;
         assert!(para

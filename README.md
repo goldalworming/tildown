@@ -18,7 +18,7 @@ Built from scratch in Rust on **wgpu + winit**. One codebase runs on desktop and
 - **Tags**: write `#tag` anywhere in a note (`#kajian`, `#work/meeting`). In read mode, click a tag to list every note with that tag. Add words after it, like `#kajian doa`, to search only within those notes.
 - **Editor**: markdown highlighting in the style of iA Writer, list and task continuation, undo/redo, and IME input.
 - **Read mode**:
-  - Headings, lists, task checkboxes you can click, quotes, code blocks, tables, local images and links.
+  - Headings, lists, task checkboxes you can click, quotes, code blocks, tables, local images and links. Plain https:// addresses become links too, and web links get a ↗ icon; click to open them in the browser.
 - **Native diagrams**, with no mermaid.js, Java or Graphviz:
   - **Mermaid**: flowcharts and sequence diagrams.
   - **PlantUML**: sequence, activity, class, object, use case, component, state, mindmap, WBS, gantt, timing, JSON, YAML, nwdiag, salt, EBNF, regex, Chen ER, chart, git, wire, ditaa and more.
