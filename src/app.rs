@@ -201,8 +201,9 @@ enum Btn {
     /// Buat token acak (disalin ke clipboard) / buka halaman deploy server.
     GenToken,
     Deploy,
-    /// Salin kode koneksi (URL + token) untuk perangkat lain.
+    /// Salin kode koneksi (URL + token) untuk perangkat lain / tempel lalu connect.
     CopyCode,
+    PasteCode,
 }
 
 /// Tombol "Deploy to Cloudflare" untuk `server/`.
@@ -2235,6 +2236,32 @@ impl App {
         let _ = self.store.write_file(".sync", &self.sync.dump());
     }
 
+    /// Isian berisi kode koneksi (`<url>#<token>`): pecah ke dua isian lalu
+    /// langsung connect.
+    fn sync_split(&mut self) {
+        if self.sync.on() {
+            return;
+        }
+        let code = self.sync_in.iter().find_map(|d| {
+            let (u, t) = d.text.trim().split_once('#')?;
+            Some((u.to_owned(), t.to_owned()))
+        });
+        if let Some((u, t)) = code {
+            self.sync_in = [Doc::new(&u), Doc::new(&t)];
+            self.sync_connect();
+        }
+    }
+
+    fn paste_code(&mut self, t: String) {
+        if t.contains('#') {
+            self.sync_in[0] = Doc::new(t.trim());
+            self.sync_split();
+        } else {
+            self.sync_last = Some(Err("the clipboard has no connection code".into()));
+        }
+        self.redraw();
+    }
+
     fn sync_status(&self) -> (String, Rgba) {
         let t = self.theme;
         if self.sync_busy {
@@ -2447,7 +2474,7 @@ impl App {
             if self.sync.on() {
                 row(&mut v, by, 3, &|i| [Btn::SyncConnect, Btn::SyncNow, Btn::CopyCode][i]);
             } else {
-                row(&mut v, by, 1, &|_| Btn::SyncConnect);
+                row(&mut v, by, 2, &|i| [Btn::SyncConnect, Btn::PasteCode][i]);
             }
         } else {
             if !self.trash.is_empty() {
@@ -2542,6 +2569,12 @@ impl App {
             }
             Btn::Deploy => open_url(DEPLOY_URL),
             Btn::SyncNow => self.sync_due = Some(Instant::now()),
+            Btn::PasteCode => {
+                #[cfg(target_arch = "wasm32")]
+                crate::web::clip_read(); // lanjut di `Ev::Kb(7, …)`
+                #[cfg(not(target_arch = "wasm32"))]
+                self.paste_code(clip_get().unwrap_or_default());
+            }
             Btn::CopyCode => {
                 clip_set(&self.sync.code());
                 self.sync_msg = Some("Code copied. On another device, paste it into Server URL.");
@@ -2768,7 +2801,10 @@ impl App {
                 (Key::Named(NamedKey::Escape), _) => self.settings = None,
                 (Key::Named(NamedKey::Enter), Some(_)) => self.sync_connect(),
                 (Key::Named(NamedKey::Tab), Some(i)) => self.sync_edit = Some(1 - i),
-                (_, Some(i)) => _ = edit_common(&mut self.sync_in[i], &ev, ctrl, m.shift_key(), false),
+                (_, Some(i)) => {
+                    edit_common(&mut self.sync_in[i], &ev, ctrl, m.shift_key(), false);
+                    self.sync_split();
+                }
                 _ => {}
             }
             self.redraw();
@@ -3054,6 +3090,7 @@ impl App {
                 if self.settings.is_some() {
                     if let Some(i) = self.sync_edit.filter(|_| self.settings == Some(2)) {
                         self.sync_in[i].insert(&s);
+                        self.sync_split();
                     }
                     self.redraw();
                     return;
@@ -4054,10 +4091,11 @@ impl App {
                     p.rframe(r, 6.0 * s, lw, if hot { t.dim } else { t.border });
                     p.center(r, Face::Medium, px, if b == Btn::Deploy { "Deploy ↗" } else { "Generate" }, t.fg);
                 }
-                Btn::SyncConnect | Btn::SyncNow | Btn::CopyCode => {
+                Btn::SyncConnect | Btn::SyncNow | Btn::CopyCode | Btn::PasteCode => {
                     let label = match b {
                         Btn::SyncNow => "Sync now",
                         Btn::CopyCode => "Copy code",
+                        Btn::PasteCode => "Paste code",
                         _ if self.sync.on() => "Disconnect",
                         _ => "Connect",
                     };
@@ -4415,6 +4453,7 @@ impl ApplicationHandler<Ev> for App {
             Ev::Sync(r) => return self.sync_done(r),
             Ev::Kb(5, s) => return self.import_note(&s),
             Ev::Kb(6, s) => return self.paste_text(s),
+            Ev::Kb(7, s) => return self.paste_code(s),
             Ev::Decoded(src, img) => {
                 if img.is_some() {
                     self.imgs.insert(src, img);

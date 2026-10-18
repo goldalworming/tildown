@@ -62,8 +62,13 @@ export function log_error(m) { console.error(m); document.title = 'TilDown — g
 // kanvas (saat ada isian aktif) memfokuskan textarea tersembunyi ini dan
 // isinya diteruskan ke aplikasi. Dua spasi lebar-nol sebagai isi supaya
 // Backspace tetap terkirim walau "kosong".
-let kb, kbOn = false;
+let kb, kbOn = false, kbCb;
+// Tombol "Paste code": baca clipboard di dalam gesture ketukan (jenis 7).
+export function clip_read() {
+  navigator.clipboard?.readText().then(t => kbCb(7, t), () => kbCb(7, ''));
+}
 export function kb_init(cb) {
+  kbCb = cb;
   kb = document.createElement('textarea');
   kb.setAttribute('autocapitalize', 'sentences');
   kb.setAttribute('aria-hidden', 'true');
@@ -154,6 +159,7 @@ extern "C" {
     pub fn log_error(m: &str);
     pub fn download(name: &str, bytes: &[u8]);
     pub fn kb_editing(on: bool);
+    pub fn clip_read();
     #[wasm_bindgen(js_name = kb_init)]
     fn kb_init_js(cb: &Closure<dyn FnMut(u8, String)>);
     #[wasm_bindgen(js_name = img_init)]
@@ -164,7 +170,8 @@ extern "C" {
 
 /// Pasang keyboard layar; `f(jenis, teks)` dipanggil untuk tiap ketikan
 /// (1 = preedit, 2 = teks, 3 = Enter, 4 = Backspace), juga isi berkas
-/// yang di-drop (5) dan teks yang ditempel (6).
+/// yang di-drop (5), teks yang ditempel (6) dan isi clipboard untuk
+/// "Paste code" (7).
 pub fn kb_init(f: impl FnMut(u8, String) + 'static) {
     let c = Closure::<dyn FnMut(u8, String)>::new(f);
     kb_init_js(&c);
