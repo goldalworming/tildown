@@ -26,6 +26,7 @@ Built from scratch in Rust on **wgpu + winit**. One codebase runs on desktop and
 - **Images**: paste a screenshot (Ctrl+V) or drop image files onto the window. They are saved to `assets/` in your notes folder and linked into the note. On the web they are kept in browser storage. Images are not synced yet.
 - **Import**: drop `.md` or `.txt` files onto the window to add each one as a new note. The original file is left unchanged. Works in the desktop app and on the web.
 - **Sync** across devices through your own Cloudflare Worker on the free plan, so your notes never pass through anyone else's server. See [Sync](#sync).
+- **Chinese, Japanese and Korean**: the desktop app uses the system font (Microsoft YaHei / Malgun Gothic on Windows, Hiragino / Apple SD Gothic on macOS). The web app downloads Noto Sans SC (8 MB) the first time it is needed, so Korean is not covered on the web.
 - **Emoji** in color, including combined emoji (👨‍👩‍👧, 👋🏽) and flags (🇮🇩).
 - **Arabic**: write Arabic, or Arabic mixed with Latin text, in the same note. It is drawn with the DigitalKhatt font, including harakat. Words are shaped with [rustybuzz](https://github.com/harfbuzz/rustybuzz). Paragraphs that start with Arabic run right to left and are aligned right.
 - **Trash**: deleted notes can be restored for 30 days.

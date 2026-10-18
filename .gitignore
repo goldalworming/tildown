@@ -1,5 +1,6 @@
 /target
 /web/pkg
+/web/fonts/NotoSansSC-Regular.otf
 
 # graft's local graph cache — regenerable, not committed (run `graft build`).
 /graft/

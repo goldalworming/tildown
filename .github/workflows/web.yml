@@ -36,6 +36,7 @@ jobs:
         run: |
           mkdir -p site
           cp -r web/index.html web/sw.js web/manifest.webmanifest web/icons web/pkg site/
+          mkdir -p site/fonts && cp web/fonts/NotoSansSC-Regular.otf site/fonts/
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site

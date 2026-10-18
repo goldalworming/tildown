@@ -4639,6 +4639,9 @@ impl ApplicationHandler<Ev> for App {
             Ev::Asset(name) => {
                 // Gambar tadi dilewati (belum terbaca): decode ulang dan susun lagi.
                 self.imgs.retain(|k, v| v.is_some() || k.trim_start_matches("./") != name);
+                if name == "font" {
+                    self.ed = EdView::default(); // font Cina datang: susun ulang teks
+                }
                 self.rd = RdView::default();
                 return self.redraw();
             }

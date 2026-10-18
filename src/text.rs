@@ -172,6 +172,8 @@ pub struct Fonts {
     shaped: HashMap<(bool, u16, String), Vec<Shaped>>,
     ar_glyphs: HashMap<(u16, u16), Option<Glyph>>,
     emo_glyphs: HashMap<(u16, u16), Option<Glyph>>,
+    /// Font cadangan yang sudah dicoba dibaca (`None` = tidak ada).
+    fb: Vec<Option<FontVec>>,
     glyphs: HashMap<(Face, u16, char), Option<Glyph>>,
     advs: HashMap<(Face, u16, char), f32>,
     /// (x, y, tinggi baris) rak atlas yang sedang diisi.
@@ -224,10 +226,26 @@ const CANDIDATES: [&[&str]; 4] = [
     ],
 ];
 
+/// Font cadangan untuk huruf yang tidak ada di Plex (Cina, Jepang, Korea),
+/// berurutan. Dibaca saat huruf seperti itu pertama tampil.
+#[cfg(windows)]
+const FALLBACK: &[&str] = &["C:/Windows/Fonts/msyh.ttc", "C:/Windows/Fonts/malgun.ttf"];
+#[cfg(target_os = "macos")]
+const FALLBACK: &[&str] = &[
+    "/System/Library/Fonts/Hiragino Sans GB.ttc",
+    "/System/Library/Fonts/STHeiti Light.ttc",
+    "/System/Library/Fonts/AppleSDGothicNeo.ttc",
+];
+#[cfg(not(any(windows, target_os = "macos", target_arch = "wasm32")))]
+const FALLBACK: &[&str] = &[
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+    "/system/fonts/NotoSansCJK-Regular.ttc",
+];
+
 impl Fonts {
     /// Font sistem. Varian yang tidak ada jatuh ke Regular; tanpa Regular gagal.
-    // ponytail: tanpa fallback per-karakter (emoji, CJK tampil sebagai kotak).
-    // Tambahkan rantai font cadangan di `glyph`/`adv` bila dibutuhkan.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn load() -> Result<Fonts, String> {
         let load = |paths: &[&str]| {
@@ -275,6 +293,7 @@ impl Fonts {
             shaped: HashMap::new(),
             ar_glyphs: HashMap::new(),
             emo_glyphs: HashMap::new(),
+            fb: Vec::new(),
             glyphs: HashMap::new(),
             advs: HashMap::new(),
             pen: (0, 0, 0),
@@ -331,12 +350,44 @@ impl Fonts {
         if let Some(&a) = self.advs.get(&k) {
             return a;
         }
-        let font = &self.faces[f as usize];
-        let a = font
-            .as_scaled(self.scale(f, k.1))
-            .h_advance(font.glyph_id(c));
+        let a = match self.pick(f, c) {
+            Some(Some(i)) => {
+                let fb = self.fb[i].as_ref().unwrap();
+                fb.as_scaled(em_scale(fb, k.1)).h_advance(fb.glyph_id(c))
+            }
+            pick => {
+                let font = &self.faces[f as usize];
+                let a = font.as_scaled(self.scale(f, k.1)).h_advance(font.glyph_id(c));
+                if pick.is_none() {
+                    return a; // font cadangan belum siap (web): jangan disimpan
+                }
+                a
+            }
+        };
         self.advs.insert(k, a);
         a
+    }
+
+    /// Font untuk `c` yang tidak ada di `f`: `Some(Some(i))` = `fb[i]`,
+    /// `Some(None)` = pakai `f`, `None` = font cadangan masih diunduh.
+    fn pick(&mut self, f: Face, c: char) -> Option<Option<usize>> {
+        if c.is_whitespace() || c.is_control() || self.faces[f as usize].glyph_id(c).0 != 0 {
+            return Some(None);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        while self.fb.len() < FALLBACK.len() && !self.fb.iter().flatten().any(|fb| fb.glyph_id(c).0 != 0) {
+            let path = FALLBACK[self.fb.len()];
+            self.fb.push(std::fs::read(path).ok().and_then(|d| FontVec::try_from_vec(d).ok()));
+        }
+        #[cfg(target_arch = "wasm32")]
+        if self.fb.is_empty() {
+            match crate::web::cjk_font() {
+                Some(d) => self.fb.push(FontVec::try_from_vec(d).ok()),
+                None if crate::web::cjk_pending() => return None,
+                None => self.fb.push(None),
+            }
+        }
+        Some(self.fb.iter().position(|fb| fb.as_ref().is_some_and(|fb| fb.glyph_id(c).0 != 0)))
     }
 
     pub fn width(&mut self, f: Face, px: f32, s: &str) -> f32 {
@@ -348,9 +399,21 @@ impl Fonts {
         if let Some(&g) = self.glyphs.get(&k) {
             return g;
         }
-        let font = &self.faces[f as usize];
-        let g = self.place(raster(font, font.glyph_id(c), self.scale(f, k.1)), false);
-        self.glyphs.insert(k, g);
+        let pick = self.pick(f, c);
+        let bitmap = match pick {
+            Some(Some(i)) => {
+                let fb = self.fb[i].as_ref().unwrap();
+                raster(fb, fb.glyph_id(c), em_scale(fb, k.1))
+            }
+            _ => {
+                let font = &self.faces[f as usize];
+                raster(font, font.glyph_id(c), self.scale(f, k.1))
+            }
+        };
+        let g = self.place(bitmap, false);
+        if pick.is_some() {
+            self.glyphs.insert(k, g);
+        }
         g
     }
 
@@ -513,6 +576,11 @@ impl Fonts {
             }
         }
     }
+}
+
+/// PxScale ab_glyph (tinggi ascent−descent) untuk em `px`.
+fn em_scale(font: &impl Font, px: u16) -> PxScale {
+    PxScale::from(px as f32 * font.height_unscaled() / font.units_per_em().unwrap_or(1000.0))
 }
 
 /// Coverage 8-bit glyph: (lebar, tinggi, kiri, atas dari baseline, data).

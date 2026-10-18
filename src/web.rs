@@ -55,6 +55,11 @@ export function opfs_untrash(name, to, text) {
   run(async () => { await put(dir, to, text); await (await trashDir()).removeEntry(name); });
 }
 export function opfs_purge(name) { run(async () => (await trashDir()).removeEntry(name)); }
+export async function fetch_bytes(u) {
+  const r = await fetch(u);
+  if (!r.ok) throw new Error(u + ': ' + r.status);
+  return new Uint8Array(await r.arrayBuffer());
+}
 // "Update": ambil build terbaru dari server, bukan dari cache service worker.
 export async function update_app() {
   try {
@@ -164,6 +169,8 @@ extern "C" {
     fn opfs_purge(name: &str);
     pub fn open_url(u: &str);
     pub fn update_app();
+    #[wasm_bindgen(catch)]
+    async fn fetch_bytes(u: &str) -> Result<JsValue, JsValue>;
     pub fn clip_write(t: &str);
     pub fn log_error(m: &str);
     pub fn download(name: &str, bytes: &[u8]);
@@ -210,6 +217,33 @@ thread_local! {
     static ASSETS: RefCell<HashMap<String, Option<Vec<u8>>>> = RefCell::new(HashMap::new());
     static LOADING: RefCell<std::collections::HashSet<String>> = RefCell::default();
     static ON_ASSET: RefCell<Option<Box<dyn Fn(String)>>> = RefCell::new(None);
+}
+
+thread_local! {
+    /// Font Cina: 0 = belum diminta, 1 = sedang diunduh, 2 = selesai/gagal.
+    static CJK_STATE: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+    static CJK: RefCell<Option<Vec<u8>>> = const { RefCell::new(None) };
+}
+
+/// Noto Sans SC (8 MB) untuk huruf Cina/Jepang: diunduh saat pertama
+/// dibutuhkan (lalu disimpan service worker), kemudian `on_asset("font")`.
+pub fn cjk_font() -> Option<Vec<u8>> {
+    if CJK_STATE.get() == 0 {
+        CJK_STATE.set(1);
+        wasm_bindgen_futures::spawn_local(async {
+            match fetch_bytes("fonts/NotoSansSC-Regular.otf").await {
+                Ok(v) => CJK.set(Some(js_sys::Uint8Array::new(&v).to_vec())),
+                Err(e) => log_error(&format!("TilDown: CJK font {e:?}")),
+            }
+            CJK_STATE.set(2);
+            ON_ASSET.with_borrow(|f| f.as_ref().map(|f| f("font".into())));
+        });
+    }
+    CJK.take()
+}
+
+pub fn cjk_pending() -> bool {
+    CJK_STATE.get() == 1
 }
 
 /// `f(nama)` dipanggil saat isi gambar selesai dibaca dari OPFS.
