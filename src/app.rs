@@ -83,6 +83,18 @@ struct Tap {
     t0: Instant,
     /// Ditahan diam ≥ `LONG_PRESS`: jari memilih teks, bukan menggulir.
     held: bool,
+    /// Kecepatan gulir jari (px/detik, arah isi) dan waktu gerak terakhir.
+    v: f32,
+    tl: Instant,
+}
+
+/// Gulir beranimasi: sisa jarak roda mouse (dihabiskan halus) dan kecepatan
+/// lemparan jari (melambat sendiri). `list` = daftar catatan, bukan isi.
+struct Glide {
+    list: bool,
+    rest: f32,
+    v: f32,
+    t: Instant,
 }
 
 const LONG_PRESS: Duration = Duration::from_millis(450);
@@ -1914,6 +1926,7 @@ pub struct App {
     upd_busy: bool,
     upd: Option<Result<String, String>>,
     share_busy: bool,
+    glide: Option<Glide>,
     /// Menu konteks terbuka di titik ini; `true` = dari sentuhan (tampil di atas jari).
     menu: Option<(f32, f32, bool)>,
     /// Pesan biasa di toolbar (bukan galat), hilang saat mengetik/pindah catatan.
@@ -2059,6 +2072,7 @@ impl App {
             upd_busy: false,
             upd: None,
             share_busy: false,
+            glide: None,
             menu: None,
             notice: String::new(),
             focused: true,
@@ -3704,7 +3718,9 @@ impl App {
     fn touch_ui(&mut self, id: u64, phase: TouchPhase, pos: (f32, f32)) {
         match phase {
             TouchPhase::Started if self.tap.is_none() => {
-                self.tap = Some(Tap { id, start: pos, last: pos, moved: false, t0: Instant::now(), held: false });
+                self.glide = None; // jari menahan lemparan yang sedang jalan
+                let now = Instant::now();
+                self.tap = Some(Tap { id, start: pos, last: pos, moved: false, t0: now, held: false, v: 0.0, tl: now });
             }
             TouchPhase::Moved => {
                 let slop = 10.0 * self.s;
@@ -3717,13 +3733,25 @@ impl App {
                 tp.moved |= (pos.0 - tp.start.0).hypot(pos.1 - tp.start.1) > slop;
                 let (d, start, moved) = ((pos.0 - tp.last.0, pos.1 - tp.last.1), tp.start, tp.moved);
                 tp.last = pos;
+                let now = Instant::now();
+                let dt = (now - tp.tl).as_secs_f32().max(0.001);
+                tp.v = 0.7 * (-d.1 / dt) + 0.3 * tp.v;
+                tp.tl = now;
                 if moved {
-                    self.mouse = start;
-                    self.wheel(MouseScrollDelta::PixelDelta(PhysicalPosition::new(d.0 as f64, d.1 as f64)));
+                    if let Some(list) = self.scroll_area(start.0, start.1) {
+                        self.scroll_by(list, -d.1);
+                        self.redraw();
+                    }
                 }
             }
             TouchPhase::Ended if self.tap.as_ref().is_some_and(|tp| tp.id == id) => {
                 let tp = self.tap.take();
+                // Lepas sambil bergerak: isi terus meluncur.
+                if let Some(t) = tp.as_ref().filter(|t| t.moved && !t.held && t.tl.elapsed() < Duration::from_millis(80)) {
+                    if let (Some(list), true) = (self.scroll_area(t.start.0, t.start.1), t.v.abs() > 100.0) {
+                        self.glide = Some(Glide { list, rest: 0.0, v: t.v.clamp(-8000.0, 8000.0), t: Instant::now() });
+                    }
+                }
                 if tp.as_ref().is_some_and(|tp| tp.held) {
                     self.release();
                     if let Some(m) = &mut self.menu {
@@ -4045,25 +4073,76 @@ impl App {
             self.zoom_by(1.2f32.powf(n), x, y);
             return;
         }
-        let dy = match d {
-            MouseScrollDelta::LineDelta(_, y) => -y * 3.0 * BODY * LH * self.s,
-            MouseScrollDelta::PixelDelta(p) => -p.y as f32,
+        // Roda mouse (per baris, atau loncatan besar dari browser): dianimasikan.
+        // Touchpad (piksel kecil-kecil, sudah halus): langsung.
+        let (dy, smooth) = match d {
+            MouseScrollDelta::LineDelta(_, y) => (-y * 3.0 * BODY * LH * self.s, true),
+            MouseScrollDelta::PixelDelta(p) => (-p.y as f32, p.y.abs() >= 50.0),
         };
-        let geo = self.geo();
         let (x, y) = self.mouse;
-        if geo.list.contains(x, y) {
-            let max = (self.res.len() as f32 * ROW_H * self.s + 14.0 * self.s - geo.list.h).max(0.0);
-            self.list_scroll = (self.list_scroll + dy).clamp(0.0, max);
-        } else if geo.content.contains(x, y) {
-            self.scroll[self.mode as usize] += dy;
-            self.clamp_scroll();
+        let Some(list) = self.scroll_area(x, y) else { return };
+        if smooth {
+            let rest = self.glide.as_ref().filter(|g| g.list == list).map_or(0.0, |g| g.rest);
+            self.glide = Some(Glide { list, rest: rest + dy, v: 0.0, t: Instant::now() });
+        } else {
+            self.glide = None;
+            self.scroll_by(list, dy);
         }
         self.redraw();
+    }
+
+    /// Bagian yang digulir di titik (x, y): `Some(true)` daftar, `Some(false)` isi.
+    fn scroll_area(&self, x: f32, y: f32) -> Option<bool> {
+        let geo = self.geo();
+        if geo.list.contains(x, y) && self.side_open {
+            Some(true)
+        } else {
+            geo.content.contains(x, y).then_some(false)
+        }
+    }
+
+    /// Gulir daftar / isi sejauh `dy`; false bila sudah mentok.
+    fn scroll_by(&mut self, list: bool, dy: f32) -> bool {
+        if list {
+            let geo = self.geo();
+            let max = (self.res.len() as f32 * ROW_H * self.s + 14.0 * self.s - geo.list.h).max(0.0);
+            let old = self.list_scroll;
+            self.list_scroll = (old + dy).clamp(0.0, max);
+            self.list_scroll != old
+        } else {
+            let m = self.mode as usize;
+            let old = self.scroll[m];
+            self.scroll[m] += dy;
+            self.clamp_scroll();
+            self.scroll[m] != old
+        }
+    }
+
+    /// Satu langkah animasi gulir (tiap frame).
+    fn glide_step(&mut self) {
+        let Some(g) = &mut self.glide else { return };
+        let now = Instant::now();
+        let dt = (now - g.t).as_secs_f32().min(0.05);
+        g.t = now;
+        // Roda: habiskan sisa jarak dengan ease-out ~80 ms.
+        let mut d = if g.rest.abs() < 0.5 { g.rest } else { g.rest * (1.0 - (-dt / 0.08).exp()) };
+        g.rest -= d;
+        // Lemparan: melambat eksponensial (τ 0,35 detik), seperti gulir HP.
+        d += g.v * dt;
+        g.v *= (-dt / 0.35).exp();
+        if g.v.abs() < 15.0 {
+            g.v = 0.0;
+        }
+        let (list, done) = (g.list, g.rest == 0.0 && g.v == 0.0);
+        if !self.scroll_by(list, d) && d != 0.0 || done {
+            self.glide = None; // mentok di ujung, atau sudah berhenti
+        }
     }
 
     // --- menggambar -----------------------------------------------------
 
     fn render(&mut self) {
+        self.glide_step();
         self.layout_views();
         self.frame_hits = self.hits();
         self.frame_base = self.base_hits();
@@ -4084,7 +4163,7 @@ impl App {
         }
         let again = f.take_cleared();
         (self.gpu, self.fonts) = (Some(g), Some(f));
-        if again {
+        if again || self.glide.is_some() {
             self.redraw();
         }
         self.update_ime_area();
