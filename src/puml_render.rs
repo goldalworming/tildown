@@ -277,10 +277,7 @@ fn text(
             if let Some(bg) = st.bg {
                 fill_rect(img, w, h, ox + g.x, oy + r.top, g.adv, r.h, bg);
             }
-            if g.c.is_whitespace() {
-                continue;
-            }
-            let Some(gl) = f.glyph(st.face, st.px, g.c) else {
+            let Some((gl, dx, dy)) = f.glyph_g(&st, g) else {
                 continue;
             };
             for u in f.uploads.drain(..) {
@@ -291,8 +288,8 @@ fn text(
                 }
             }
             let (gx, gy) = (
-                (ox + g.x + gl.left).round() as i64,
-                (oy + r.base - gl.top).round() as i64,
+                (ox + g.x + dx + gl.left).round() as i64,
+                (oy + r.base - dy - gl.top).round() as i64,
             );
             for yy in 0..gl.h as i64 {
                 for xx in 0..gl.w as i64 {

@@ -515,8 +515,21 @@ fn marks<'a>(text: &'a str, terms: &[String]) -> Vec<(&'a str, bool)> {
     out
 }
 
-fn xpos(r: &Row, i: usize) -> f32 {
-    r.gs.iter().find(|g| g.i >= i).map_or(r.w, |g| g.x)
+/// Rentang x glyph dengan byte di [lo, hi) pada satu baris. Teks kanan-ke-kiri
+/// di tengah teks kiri-ke-kanan bisa terpisah secara visual: diambil
+/// selubungnya.
+fn xspan(r: &Row, lo: usize, hi: usize) -> (f32, f32) {
+    let (a, b) = r
+        .gs
+        .iter()
+        .filter(|g| g.i >= lo && g.i < hi && g.c != '\n')
+        .fold((f32::MAX, f32::MIN), |(a, b), g| (a.min(g.x), b.max(g.x + g.adv)));
+    if a <= b {
+        (a, b)
+    } else {
+        let x = r.x_at(lo);
+        (x, x)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -587,13 +600,16 @@ impl RdView {
             if let Some(b) = prev_bottom {
                 out.push(if *iy < b { ' ' } else { '\n' });
             }
-            out.extend(
-                lay.rows
-                    .iter()
-                    .flat_map(|r| &r.gs)
-                    .filter(|g| g.i >= lo && g.i < hi)
-                    .map(|g| g.c),
-            );
+            let mut cs: Vec<(usize, char)> = lay
+                .rows
+                .iter()
+                .flat_map(|r| &r.gs)
+                .filter(|g| g.i >= lo && g.i < hi)
+                .map(|g| (g.i, g.c))
+                .collect();
+            cs.sort_by_key(|g| g.0);
+            cs.dedup_by_key(|g| g.0); // harakat/ligatur: beberapa glyph satu huruf
+            out.extend(cs.into_iter().map(|g| g.1));
             prev_bottom = Some(iy + lay.h);
         }
         out
@@ -1487,6 +1503,10 @@ impl P<'_> {
 
     /// Satu baris dari potongan (teks, face, warna); "…" bila melebihi `max_w`.
     fn parts(&mut self, x: f32, base: f32, px: f32, parts: &[(&str, Face, Rgba)], max_w: f32) {
+        if parts.iter().any(|p| p.0.chars().any(crate::text::is_arabic)) {
+            self.shaped_line(x, base, px, parts, max_w);
+            return;
+        }
         let total: f32 = parts.iter().map(|(t, f, _)| self.f.width(*f, px, t)).sum();
         let Some(&(_, f0, _)) = parts.first() else { return };
         let limit = if total > max_w {
@@ -1512,6 +1532,12 @@ impl P<'_> {
 
     fn glyph(&mut self, face: Face, px: f32, ch: char, x: f32, base: f32, c: Rgba) {
         if let Some(gl) = self.f.glyph(face, px, ch) {
+            self.quad_glyph(gl, x, base, c);
+        }
+    }
+
+    fn quad_glyph(&mut self, gl: crate::text::Glyph, x: f32, base: f32, c: Rgba) {
+        {
             let a = ATLAS as f32;
             let r = Rect::new(
                 (x + gl.left).round(),
@@ -1540,6 +1566,9 @@ impl P<'_> {
         c: Rgba,
         max_w: f32,
     ) -> f32 {
+        if s.chars().any(crate::text::is_arabic) {
+            return self.shaped_line(x, base, px, &[(s, face, c)], max_w);
+        }
         let limit = if self.f.width(face, px, s) > max_w {
             max_w - self.f.adv(face, px, '…')
         } else {
@@ -1560,6 +1589,29 @@ impl P<'_> {
         cx
     }
 
+    /// Satu baris berisi huruf Arab; glyph yang melewati `max_w` tidak digambar.
+    // ponytail: dipotong tanpa "…"; tambahkan bila judul Arab panjang terlihat janggal.
+    fn shaped_line(&mut self, x: f32, base: f32, px: f32, parts: &[(&str, Face, Rgba)], max_w: f32) -> f32 {
+        let mut text = String::new();
+        let mut runs = Vec::new();
+        for &(t, face, c) in parts {
+            text.push_str(t);
+            runs.push((text.len(), crate::text::Style::new(face, px, c)));
+        }
+        let l = crate::text::layout(self.f, &text, &runs, f32::INFINITY, 1.0);
+        let Some(r) = l.rows.first() else { return x };
+        for g in &r.gs {
+            if g.x + g.adv > max_w {
+                continue;
+            }
+            let st = l.styles[g.st as usize];
+            if let Some((gl, dx, dy)) = self.f.glyph_g(&st, g) {
+                self.quad_glyph(gl, x + g.x + dx, base - dy, st.color);
+            }
+        }
+        x + r.w.min(max_w)
+    }
+
     /// Gambar layout di (x, y); baris di luar [top, bot] dilewati.
     fn lay(&mut self, l: &Lay, x: f32, y: f32, top: f32, bot: f32) {
         let t = self.lw();
@@ -1578,8 +1630,8 @@ impl P<'_> {
             }
             for g in &r.gs {
                 let st = l.styles[g.st as usize];
-                if !g.c.is_whitespace() {
-                    self.glyph(st.face, st.px, g.c, x + g.x, y + r.base, st.color);
+                if let Some((gl, dx, dy)) = self.f.glyph_g(&st, g) {
+                    self.quad_glyph(gl, x + g.x + dx, y + r.base - dy, st.color);
                 }
                 if st.under {
                     self.rect(Rect::new(x + g.x, y + r.base + 2.0 * t, g.adv, t), st.color);
@@ -4187,8 +4239,8 @@ impl App {
                     let hi = (b - l.start).min(r.end);
                     let nl = b > l.end && k + 1 == n; // newline ikut terpilih
                     if lo < hi || (nl && lo <= hi) {
-                        let x1 = xpos(r, lo);
-                        let x2 = xpos(r, hi) + if nl { 6.0 * s } else { 0.0 };
+                        let (x1, x2) = xspan(r, lo, hi);
+                        let x2 = x2 + if nl { 6.0 * s } else { 0.0 };
                         p.rect(Rect::new(ox + x1, y + r.top, x2 - x1, r.h), t.sel);
                     }
                 }
@@ -4201,7 +4253,7 @@ impl App {
                     let lo = m.start.saturating_sub(l.start).max(r.start);
                     let hi = (m.end - l.start).min(r.end);
                     if lo < hi {
-                        let (x1, x2) = (xpos(r, lo), xpos(r, hi));
+                        let (x1, x2) = xspan(r, lo, hi);
                         let c = if mi == cur_m { hl_on } else { hl };
                         p.rect(Rect::new(ox + x1, y + r.top, x2 - x1, r.h), c);
                     }
@@ -4365,7 +4417,7 @@ impl App {
                     for r in &lay.rows {
                         let (a, b) = (lo.max(r.start), hi.min(r.end));
                         if a < b {
-                            let (x1, x2) = (xpos(r, a), xpos(r, b));
+                            let (x1, x2) = xspan(r, a, b);
                             p.rect(Rect::new(ox + x + x1, oy + y + r.top, x2 - x1, r.h), t.sel);
                         }
                     }

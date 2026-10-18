@@ -25,6 +25,7 @@ Built from scratch in Rust on **wgpu + winit**. One codebase runs on desktop and
 - **Images**: paste a screenshot (Ctrl+V) or drop image files onto the window. They are saved to `assets/` in your notes folder and linked into the note. On the web they are kept in browser storage. Images are not synced yet.
 - **Import**: drop `.md` or `.txt` files onto the window to add each one as a new note. The original file is left unchanged. Works in the desktop app and on the web.
 - **Sync** across devices through your own Cloudflare Worker on the free plan, so your notes never pass through anyone else's server. See [Sync](#sync).
+- **Arabic**: write Arabic, or Arabic mixed with Latin text, in the same note. It is drawn with the DigitalKhatt font, including harakat. Words are shaped with [rustybuzz](https://github.com/harfbuzz/rustybuzz). Paragraphs that start with Arabic run right to left and are aligned right.
 - **Trash**: deleted notes can be restored for 30 days.
 - **Settings**: light, dark or system theme, text size, line width, and whether notes open in edit or read mode.
 
@@ -157,7 +158,7 @@ docs/PRD.md     product requirements (Indonesian)
 
 ## Credits
 
-- Fonts: [IBM Plex](https://github.com/IBM/plex) and [Noto Sans](https://fonts.google.com/noto), both under the SIL Open Font License.
+- Fonts: [IBM Plex](https://github.com/IBM/plex), [Noto Sans](https://fonts.google.com/noto) and [DigitalKhatt Madina](https://github.com/DigitalKhatt/madinafont) (Arabic), all under the SIL Open Font License.
 - Icons: [Lucide](https://lucide.dev) (ISC).
 
 ## License
