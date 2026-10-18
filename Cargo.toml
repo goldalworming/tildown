@@ -1,6 +1,6 @@
 [package]
 name = "tildown"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 description = "TilDown (Tilde + markdown): catatan markdown ringan, wgpu + winit"
 repository = "https://github.com/goldalworming/tildown"
