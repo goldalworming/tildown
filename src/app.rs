@@ -247,19 +247,67 @@ const RELEASES: &str = "https://github.com/goldalworming/tildown/releases/latest
 const RELEASES_API: &str = "https://api.github.com/repos/goldalworming/tildown/releases/latest";
 
 /// Tag rilis (`v1.2.3`) lebih baru dari versi aplikasi ini.
+/// Update di dalam aplikasi (Windows, macOS); lainnya membuka halaman unduh.
+const SELF_UPDATE: bool = cfg!(any(windows, target_os = "macos"));
+
+/// `…/TilDown.app` kalau exe ini berjalan dari bundle macOS.
+#[cfg(not(target_arch = "wasm32"))]
+fn mac_bundle(exe: &std::path::Path) -> Option<PathBuf> {
+    let app = exe.ancestors().nth(3)?;
+    (cfg!(target_os = "macos") && app.extension()? == "app").then(|| app.to_owned())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn download(url: &str) -> Result<Vec<u8>, String> {
+    ureq::get(url)
+        .call()
+        .and_then(|mut r| r.body_mut().with_config().limit(200 << 20).read_to_vec())
+        .map_err(|e| e.to_string())
+}
+
+/// macOS: unduh dmg rilis `tag`, salin TilDown.app di dalamnya ke samping
+/// bundle yang sedang jalan, lalu tukar (yang lama dihapus saat start berikut).
+#[cfg(target_os = "macos")]
+fn install_update(tag: &str) -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let app = mac_bundle(&exe).ok_or("not running from TilDown.app")?;
+    let url = format!(
+        "https://github.com/goldalworming/tildown/releases/download/{tag}/TilDown-{}-macos.dmg",
+        tag.trim_start_matches('v')
+    );
+    let dmg = std::env::temp_dir().join("tildown-update.dmg");
+    let mnt = std::env::temp_dir().join("tildown-update");
+    std::fs::write(&dmg, download(&url)?).map_err(|e| e.to_string())?;
+    let run = |cmd: &str, args: &[&std::ffi::OsStr]| -> Result<(), String> {
+        let ok = std::process::Command::new(cmd).args(args).status().map_err(|e| e.to_string())?.success();
+        if ok { Ok(()) } else { Err(format!("{cmd} failed")) }
+    };
+    let _ = std::fs::create_dir_all(&mnt);
+    run("hdiutil", &["attach".as_ref(), "-nobrowse".as_ref(), "-quiet".as_ref(), "-mountpoint".as_ref(), mnt.as_os_str(), dmg.as_os_str()])?;
+    let (new, old) = (app.with_extension("new"), app.with_extension("old"));
+    let _ = std::fs::remove_dir_all(&new);
+    let copied = run("ditto", &[mnt.join("TilDown.app").as_os_str(), new.as_os_str()]);
+    let _ = run("hdiutil", &["detach".as_ref(), "-quiet".as_ref(), mnt.as_os_str()]);
+    let _ = std::fs::remove_file(&dmg);
+    copied?;
+    let _ = std::fs::remove_dir_all(&old);
+    std::fs::rename(&app, &old).map_err(|e| e.to_string())?;
+    std::fs::rename(&new, &app).map_err(|e| {
+        let _ = std::fs::rename(&old, &app);
+        e.to_string()
+    })
+}
+
 /// Windows: unduh exe portable rilis `tag` dan tukar dengan exe yang sedang
 /// jalan (exe yang jalan boleh di-rename; yang lama dihapus saat start berikut).
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "macos")))]
 fn install_update(tag: &str) -> Result<(), String> {
     let url = format!(
         "https://github.com/goldalworming/tildown/releases/download/{tag}/TilDown-{}-portable.exe",
         tag.trim_start_matches('v')
     );
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let bin = ureq::get(&url)
-        .call()
-        .and_then(|mut r| r.body_mut().with_config().limit(200 << 20).read_to_vec())
-        .map_err(|e| e.to_string())?;
+    let bin = download(&url)?;
     if bin.len() < 1 << 20 || !bin.starts_with(b"MZ") {
         return Err("bad download".into());
     }
@@ -1987,6 +2035,9 @@ pub fn run() -> Result<(), String> {
     // Sisa update sebelumnya (exe lama yang sudah diganti).
     if let Ok(exe) = std::env::current_exe() {
         let _ = std::fs::remove_file(exe.with_extension("old"));
+        if let Some(app) = mac_bundle(&exe) {
+            let _ = std::fs::remove_dir_all(app.with_extension("old"));
+        }
     }
     // Mode screenshot butuh gambar di frame pertama: tetap sinkron.
     if std::env::var_os("MARKDOWN_SHOT").is_none() {
@@ -2524,7 +2575,7 @@ impl App {
             _ if self.upd_ready => "Restart",
             Some(Ok(tag)) if self.upd_busy && newer(tag) => "Downloading…",
             _ if self.upd_busy => "Checking…",
-            Some(Ok(tag)) if newer(tag) && cfg!(windows) => "Update",
+            Some(Ok(tag)) if newer(tag) && SELF_UPDATE => "Update",
             Some(Ok(tag)) if newer(tag) => "Download",
             _ => "Check for updates",
         }
@@ -2554,7 +2605,7 @@ impl App {
             let Some(proxy) = self.proxy.clone() else { return };
             if let Some(Ok(tag)) = &self.upd {
                 if newer(tag) {
-                    if !cfg!(windows) {
+                    if !SELF_UPDATE {
                         return open_url(RELEASES);
                     }
                     let tag = tag.clone();

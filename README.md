@@ -31,7 +31,7 @@ Built from scratch in Rust on **wgpu + winit**. One codebase runs on desktop and
 - **Emoji** in color, including combined emoji (👨‍👩‍👧, 👋🏽) and flags (🇮🇩).
 - **Arabic**: write Arabic, or Arabic mixed with Latin text, in the same note. It is drawn with the DigitalKhatt font, including harakat. Words are shaped with [rustybuzz](https://github.com/harfbuzz/rustybuzz). Paragraphs that start with Arabic run right to left and are aligned right.
 - **Trash**: deleted notes can be restored for 30 days.
-- **Settings**: light, dark or system theme, text size, line width, and whether notes open in edit or read mode. **Check for updates** shows when a newer release is available; on Windows, **Update** downloads and installs it in place, then **Restart** (no setup needed). In the web app, **Update** reloads the latest version.
+- **Settings**: light, dark or system theme, text size, line width, and whether notes open in edit or read mode. **Check for updates** shows when a newer release is available; on Windows and macOS, **Update** downloads and installs it in place, then **Restart** (no setup or dmg needed). In the web app, **Update** reloads the latest version.
 
 ## Install on Windows
 
