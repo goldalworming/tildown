@@ -3245,6 +3245,7 @@ impl App {
             (m.control_key() && !m.alt_key()) || m.super_key(),
             m.shift_key(),
         );
+        let (ev, ctrl) = if cfg!(target_os = "macos") { self.mac_keys(ev, ctrl) } else { (ev, ctrl) };
         if let (true, Key::Character(c)) = (ctrl, &ev.logical_key) {
             match c.to_lowercase().as_str() {
                 // Clipboard tanpa teks tapi berisi gambar: simpan lalu tautkan.
@@ -3262,6 +3263,40 @@ impl App {
             self.key_focused(&ev, ctrl, shift);
         }
         self.redraw();
+    }
+
+    /// macOS: Cmd+←/→ = awal/akhir baris, Cmd+↑/↓ = awal/akhir catatan,
+    /// Option+←/→/⌫/⌦ = per kata, Cmd+⌫ = hapus sampai awal baris. Diterjemahkan
+    /// ke tombol versi Windows/Linux.
+    fn mac_keys(&mut self, ev: KeyEvent, ctrl: bool) -> (KeyEvent, bool) {
+        use NamedKey::*;
+        let (cmd, opt) = (self.mods.super_key(), self.mods.alt_key());
+        let mut e = ev.clone();
+        let Key::Named(k) = ev.logical_key else { return (ev, ctrl) };
+        let ctrl = match (k, cmd, opt) {
+            (ArrowLeft | ArrowRight, true, _) => {
+                e.logical_key = Key::Named(if k == ArrowLeft { Home } else { End });
+                false
+            }
+            (ArrowUp | ArrowDown, true, _) => {
+                e.logical_key = Key::Named(if k == ArrowUp { Home } else { End });
+                true
+            }
+            (Backspace, true, _) => {
+                let d = match (self.focus, self.mode) {
+                    (Focus::Search, _) => &mut self.search,
+                    (Focus::Editor, Mode::Edit) => &mut self.doc,
+                    _ => return (e, false),
+                };
+                if d.cursor == d.anchor {
+                    d.set_cursor(d.line_start(d.cursor), true);
+                }
+                false
+            }
+            (ArrowLeft | ArrowRight | Backspace | Delete, false, true) => true,
+            _ => ctrl,
+        };
+        (e, ctrl)
     }
 
     fn key_focused(&mut self, ev: &KeyEvent, ctrl: bool, shift: bool) {
