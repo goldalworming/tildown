@@ -67,6 +67,12 @@ On a phone:
 
 Use [Sync](#sync) to keep your notes in step with the desktop app.
 
+### Android APK
+
+Every release also has `TilDown-<version>-android.apk`. It opens the same web app full screen in Chrome (a Trusted Web Activity), so the app updates itself like the web version; install the APK only once. It shares Chrome's storage, so it shows the same notes as the web app installed from Chrome on that phone.
+
+The APK is built by `.github/workflows/android.yml` from `android/`. It needs the repository secrets `KEYSTORE_B64` (the signing key, base64) and `KEY_PASS`. To show without a browser address bar, `android/assetlinks.json` must be served at `https://<user>.github.io/.well-known/assetlinks.json`.
+
 The site is built and published by `.github/workflows/web.yml` on every push to `main`. If you fork the repo, enable this once under **Settings → Pages → Source: GitHub Actions**.
 
 ## Sync

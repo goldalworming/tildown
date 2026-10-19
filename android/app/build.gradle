@@ -1,0 +1,36 @@
+// TWA (Trusted Web Activity): membuka web app TilDown layar penuh di Chrome.
+// Isi aplikasi ikut ter-update dari GitHub Pages; APK hanya cangkang.
+plugins {
+    id "com.android.application"
+}
+
+android {
+    namespace "io.github.goldalworming.tildown"
+    compileSdk 34
+    defaultConfig {
+        applicationId "io.github.goldalworming.tildown"
+        minSdk 21
+        targetSdk 34
+        versionCode((System.getenv("VERSION_CODE") ?: "1") as int)
+        versionName System.getenv("VERSION_NAME") ?: "1.0"
+    }
+    signingConfigs {
+        release {
+            storeFile file(System.getenv("KEYSTORE") ?: "none.jks")
+            storePassword System.getenv("KEY_PASS")
+            keyAlias "tildown"
+            keyPassword System.getenv("KEY_PASS")
+        }
+    }
+    buildTypes {
+        release { signingConfig signingConfigs.release }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation "com.google.androidbrowserhelper:androidbrowserhelper:2.5.0"
+}

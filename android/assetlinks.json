@@ -1,0 +1,8 @@
+[{
+  "relation": ["delegate_permission/common.handle_all_urls"],
+  "target": {
+    "namespace": "android_app",
+    "package_name": "io.github.goldalworming.tildown",
+    "sha256_cert_fingerprints": ["D6:1E:6B:EF:9D:8E:2A:85:3B:47:C3:E9:A6:32:86:90:9E:33:DA:0E:34:0C:ED:2E:81:EC:C9:50:8B:39:DA:CB"]
+  }
+}]

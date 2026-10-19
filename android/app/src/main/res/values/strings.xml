@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">TilDown</string>
+    <!-- Domain web app ini; harus cocok dengan /.well-known/assetlinks.json di sana. -->
+    <string name="asset_statements">[{\"relation\": [\"delegate_permission/common.handle_all_urls\"], \"target\": {\"namespace\": \"web\", \"site\": \"https://goldalworming.github.io\"}}]</string>
+</resources>
