@@ -57,6 +57,9 @@ pub enum Ev {
     /// Tag rilis terbaru di GitHub (desktop).
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     Update(Result<String, String>),
+    /// Exe baru sudah terpasang (Windows); tinggal restart.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    Updated(Result<(), String>),
     /// Jawaban `/share` (true) atau `/unshare` untuk catatan id.
     Share(String, bool, Result<String, String>),
     /// Keyboard layar (web): 1 = preedit, 2 = teks, 3 = Enter, 4 = Backspace;
@@ -244,6 +247,32 @@ const RELEASES: &str = "https://github.com/goldalworming/tildown/releases/latest
 const RELEASES_API: &str = "https://api.github.com/repos/goldalworming/tildown/releases/latest";
 
 /// Tag rilis (`v1.2.3`) lebih baru dari versi aplikasi ini.
+/// Windows: unduh exe portable rilis `tag` dan tukar dengan exe yang sedang
+/// jalan (exe yang jalan boleh di-rename; yang lama dihapus saat start berikut).
+#[cfg(not(target_arch = "wasm32"))]
+fn install_update(tag: &str) -> Result<(), String> {
+    let url = format!(
+        "https://github.com/goldalworming/tildown/releases/download/{tag}/TilDown-{}-portable.exe",
+        tag.trim_start_matches('v')
+    );
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let bin = ureq::get(&url)
+        .call()
+        .and_then(|mut r| r.body_mut().with_config().limit(200 << 20).read_to_vec())
+        .map_err(|e| e.to_string())?;
+    if bin.len() < 1 << 20 || !bin.starts_with(b"MZ") {
+        return Err("bad download".into());
+    }
+    let (new, old) = (exe.with_extension("new"), exe.with_extension("old"));
+    std::fs::write(&new, bin).map_err(|e| e.to_string())?;
+    let _ = std::fs::remove_file(&old);
+    std::fs::rename(&exe, &old).map_err(|e| e.to_string())?;
+    std::fs::rename(&new, &exe).map_err(|e| {
+        let _ = std::fs::rename(&old, &exe);
+        e.to_string()
+    })
+}
+
 fn newer(tag: &str) -> bool {
     let v = |s: &str| -> Vec<u32> { s.trim_start_matches('v').split('.').map(|x| x.parse().unwrap_or(0)).collect() };
     v(tag) > v(env!("CARGO_PKG_VERSION"))
@@ -1927,6 +1956,8 @@ pub struct App {
     /// Cek update: sedang berjalan / tag rilis terbaru.
     upd_busy: bool,
     upd: Option<Result<String, String>>,
+    /// Exe baru sudah terpasang: tombol jadi Restart.
+    upd_ready: bool,
     share_busy: bool,
     glide: Option<Glide>,
     /// Menu konteks terbuka di titik ini; `true` = dari sentuhan (tampil di atas jari).
@@ -1953,6 +1984,10 @@ pub fn run() -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     let mut app = App::new(store, fonts);
     app.proxy = Some(el.create_proxy());
+    // Sisa update sebelumnya (exe lama yang sudah diganti).
+    if let Ok(exe) = std::env::current_exe() {
+        let _ = std::fs::remove_file(exe.with_extension("old"));
+    }
     // Mode screenshot butuh gambar di frame pertama: tetap sinkron.
     if std::env::var_os("MARKDOWN_SHOT").is_none() {
         let p = el.create_proxy();
@@ -2076,6 +2111,7 @@ impl App {
             sync_msg: None,
             upd_busy: false,
             upd: None,
+            upd_ready: false,
             share_busy: false,
             nav: 0,
             glide: None,
@@ -2485,25 +2521,50 @@ impl App {
     fn update_label(&self) -> &'static str {
         match &self.upd {
             _ if cfg!(target_arch = "wasm32") => "Update",
+            _ if self.upd_ready => "Restart",
+            Some(Ok(tag)) if self.upd_busy && newer(tag) => "Downloading…",
             _ if self.upd_busy => "Checking…",
+            Some(Ok(tag)) if newer(tag) && cfg!(windows) => "Update",
             Some(Ok(tag)) if newer(tag) => "Download",
             _ => "Check for updates",
         }
     }
 
     /// Web: muat ulang build terbaru. Desktop: tanya GitHub rilis terbaru;
-    /// kalau sudah ada yang lebih baru, buka halaman unduhnya.
+    /// kalau sudah ada yang lebih baru: Windows mengunduh dan memasang exe-nya
+    /// sendiri (lalu Restart), macOS/Linux membuka halaman unduh.
     fn update(&mut self) {
         #[cfg(target_arch = "wasm32")]
         crate::web::update_app();
         #[cfg(not(target_arch = "wasm32"))]
         {
-            if let Some(Ok(tag)) = &self.upd {
-                if newer(tag) {
-                    return open_url(RELEASES);
+            if self.upd_busy {
+                return;
+            }
+            if self.upd_ready {
+                self.save_now();
+                self.save_state();
+                if let Ok(exe) = std::env::current_exe() {
+                    if std::process::Command::new(exe).spawn().is_ok() {
+                        std::process::exit(0);
+                    }
                 }
+                return;
             }
             let Some(proxy) = self.proxy.clone() else { return };
+            if let Some(Ok(tag)) = &self.upd {
+                if newer(tag) {
+                    if !cfg!(windows) {
+                        return open_url(RELEASES);
+                    }
+                    let tag = tag.clone();
+                    self.upd_busy = true;
+                    std::thread::spawn(move || {
+                        let _ = proxy.send_event(Ev::Updated(install_update(&tag)));
+                    });
+                    return;
+                }
+            }
             self.upd_busy = true;
             std::thread::spawn(move || {
                 let r = ureq::get(RELEASES_API)
@@ -2512,7 +2573,8 @@ impl App {
                     .and_then(|mut r| r.body_mut().read_to_string())
                     .map_err(|e| e.to_string())
                     .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).map_err(|e| e.to_string()))
-                    .and_then(|v| v["tag_name"].as_str().map(str::to_owned).ok_or_else(|| "no release".into()));
+                    .and_then(|v| v["tag_name"].as_str().map(str::to_owned).ok_or_else(|| "no release".into()))
+                    .map_err(|_| "couldn't check".to_owned());
                 let _ = proxy.send_event(Ev::Update(r));
             });
         }
@@ -4587,12 +4649,16 @@ impl App {
             let mut v = concat!("TilDown v", env!("CARGO_PKG_VERSION")).to_owned();
             let mut vc = t.dim;
             match &self.upd {
+                Some(Ok(tag)) if self.upd_ready => {
+                    v += &format!(" · {tag} installed, restart to use it");
+                    vc = t.accent;
+                }
                 Some(Ok(tag)) if newer(tag) => {
                     v += &format!(" · {tag} available");
                     vc = t.accent;
                 }
                 Some(Ok(_)) => v += " · up to date",
-                Some(Err(_)) => v += " · couldn't check",
+                Some(Err(e)) => v += &format!(" · {e}"),
                 None => {}
             }
             let uw = hits.iter().find(|h| h.1 == Btn::Update).map_or(0.0, |h| h.0.w);
@@ -5066,6 +5132,14 @@ impl ApplicationHandler<Ev> for App {
             }
             Ev::Update(r) => {
                 (self.upd_busy, self.upd) = (false, Some(r));
+                return self.redraw();
+            }
+            Ev::Updated(r) => {
+                self.upd_busy = false;
+                match r {
+                    Ok(()) => self.upd_ready = true,
+                    Err(e) => self.upd = Some(Err(format!("update failed: {e}"))),
+                }
                 return self.redraw();
             }
             Ev::Kb(5, s) => return self.import_note(&s),
