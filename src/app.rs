@@ -321,6 +321,25 @@ fn install_update(tag: &str) -> Result<(), String> {
     })
 }
 
+/// Tanya GitHub tag rilis terbaru → `Ev::Update`. `quiet`: cek otomatis saat
+/// start; gagal (offline) tidak dilaporkan.
+#[cfg(not(target_arch = "wasm32"))]
+fn check_update(proxy: winit::event_loop::EventLoopProxy<Ev>, quiet: bool) {
+    std::thread::spawn(move || {
+        let r = ureq::get(RELEASES_API)
+            .header("Accept", "application/vnd.github+json")
+            .call()
+            .and_then(|mut r| r.body_mut().read_to_string())
+            .map_err(|e| e.to_string())
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).map_err(|e| e.to_string()))
+            .and_then(|v| v["tag_name"].as_str().map(str::to_owned).ok_or_else(|| "no release".into()))
+            .map_err(|_| "couldn't check".to_owned());
+        if r.is_ok() || !quiet {
+            let _ = proxy.send_event(Ev::Update(r));
+        }
+    });
+}
+
 fn newer(tag: &str) -> bool {
     let v = |s: &str| -> Vec<u32> { s.trim_start_matches('v').split('.').map(|x| x.parse().unwrap_or(0)).collect() };
     v(tag) > v(env!("CARGO_PKG_VERSION"))
@@ -2041,6 +2060,7 @@ pub fn run() -> Result<(), String> {
     }
     // Mode screenshot butuh gambar di frame pertama: tetap sinkron.
     if std::env::var_os("MARKDOWN_SHOT").is_none() {
+        check_update(el.create_proxy(), true);
         let p = el.create_proxy();
         _ = DECODED.set(Box::new(move |src, img| _ = p.send_event(Ev::Decoded(src, img))));
     }
@@ -2617,18 +2637,13 @@ impl App {
                 }
             }
             self.upd_busy = true;
-            std::thread::spawn(move || {
-                let r = ureq::get(RELEASES_API)
-                    .header("Accept", "application/vnd.github+json")
-                    .call()
-                    .and_then(|mut r| r.body_mut().read_to_string())
-                    .map_err(|e| e.to_string())
-                    .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).map_err(|e| e.to_string()))
-                    .and_then(|v| v["tag_name"].as_str().map(str::to_owned).ok_or_else(|| "no release".into()))
-                    .map_err(|_| "couldn't check".to_owned());
-                let _ = proxy.send_event(Ev::Update(r));
-            });
+            check_update(proxy, false);
         }
+    }
+
+    /// Ada rilis lebih baru (atau sudah terpasang, tinggal restart).
+    fn upd_new(&self) -> bool {
+        self.upd_ready || matches!(&self.upd, Some(Ok(tag)) if newer(tag))
     }
 
     fn sync_status(&self) -> (String, Rgba) {
@@ -4571,6 +4586,10 @@ impl App {
                     p.icon("settings", r.x + 10.0 * s, (r.y + 10.0 * s).round(), 16.0 * s, t.fg);
                     let base = p.base(Face::Medium, 14.0 * s, r.y, r.h);
                     p.text(r.x + 36.0 * s, base, Face::Medium, 14.0 * s, "Settings", t.fg, r.w);
+                    if self.upd_new() {
+                        let d = (7.0 * s).round();
+                        p.rrect(Rect::new((r.x + 23.0 * s).round(), (r.y + 7.0 * s).round(), d, d), d / 2.0, t.accent);
+                    }
                 }
                 _ => {}
             }
