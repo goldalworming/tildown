@@ -29,7 +29,8 @@ jobs:
           KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
           KEY_PASS: ${{ secrets.KEY_PASS }}
         run: |
-          [ -n "$KEYSTORE_B64" ] || { echo "::error::secret KEYSTORE_B64 belum diisi"; exit 1; }
+          # Tanpa kunci: lewati (rilis desktop tetap jalan, tanpa APK).
+          [ -n "$KEYSTORE_B64" ] || { echo "::notice::secret KEYSTORE_B64 belum diisi, APK dilewati"; exit 0; }
           echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/k.jks"
           export KEYSTORE="$RUNNER_TEMP/k.jks"
           export VERSION_CODE=$(git rev-list --count HEAD)
@@ -40,3 +41,4 @@ jobs:
         with:
           name: android
           path: '*.apk'
+          if-no-files-found: ignore
