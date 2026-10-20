@@ -89,6 +89,8 @@ struct Tap {
     /// Kecepatan gulir jari (px/detik, arah isi) dan waktu gerak terakhir.
     v: f32,
     tl: Instant,
+    /// Menarik pegangan seleksi: jarak jari di bawah titik yang dipindah.
+    dy: f32,
 }
 
 /// Gulir beranimasi: sisa jarak roda mouse (dihabiskan halus) dan kecepatan
@@ -2029,6 +2031,8 @@ pub struct App {
     glide: Option<Glide>,
     /// Menu konteks terbuka di titik ini; `true` = dari sentuhan (tampil di atas jari).
     menu: Option<(f32, f32, bool)>,
+    /// Seleksi dibuat dengan sentuhan: tampilkan pegangan di kedua ujungnya.
+    touch_sel: bool,
     /// Pesan biasa di toolbar (bukan galat), hilang saat mengetik/pindah catatan.
     notice: String,
     focused: bool,
@@ -2187,6 +2191,7 @@ impl App {
             nav: 0,
             glide: None,
             menu: None,
+            touch_sel: false,
             notice: String::new(),
             focused: true,
             tap: None,
@@ -3899,7 +3904,16 @@ impl App {
             TouchPhase::Started if self.tap.is_none() => {
                 self.glide = None; // jari menahan lemparan yang sedang jalan
                 let now = Instant::now();
-                self.tap = Some(Tap { id, start: pos, last: pos, moved: false, t0: now, held: false, v: 0.0, tl: now });
+                let mut tp = Tap { id, start: pos, last: pos, moved: false, t0: now, held: false, v: 0.0, tl: now, dy: 0.0 };
+                let r = 28.0 * self.s;
+                if let Some(hs) = self.sel_handles() {
+                    if let Some(j) = (0..2).find(|&j| (pos.0 - hs[j].0).hypot(pos.1 - hs[j].1 - r / 3.0) < r) {
+                        self.grab_handle(j);
+                        (tp.held, tp.moved, tp.dy) = (true, true, pos.1 - hs[j].1 + 8.0 * self.s);
+                        self.menu = None;
+                    }
+                }
+                self.tap = Some(tp);
             }
             TouchPhase::Moved => {
                 let slop = 10.0 * self.s;
@@ -3907,7 +3921,13 @@ impl App {
                     return;
                 };
                 if tp.held {
-                    return self.mouse_move(pos.0, pos.1); // perluas seleksi
+                    // Jari yang bergetar sedikit tidak memotong kata pilihan long-press.
+                    if !tp.moved && (pos.0 - tp.start.0).hypot(pos.1 - tp.start.1) <= slop {
+                        return;
+                    }
+                    tp.moved = true;
+                    let dy = tp.dy;
+                    return self.mouse_move(pos.0, pos.1 - dy); // perluas seleksi
                 }
                 tp.moved |= (pos.0 - tp.start.0).hypot(pos.1 - tp.start.1) > slop;
                 let (d, start, moved) = ((pos.0 - tp.last.0, pos.1 - tp.last.1), tp.start, tp.moved);
@@ -3933,10 +3953,11 @@ impl App {
                 }
                 if tp.as_ref().is_some_and(|tp| tp.held) {
                     self.release();
-                    if let Some(m) = &mut self.menu {
-                        (m.0, m.1) = pos; // menu di dekat jari terakhir
+                    if self.has_selection() {
+                        self.menu = Some((pos.0, pos.1, true)); // menu di dekat jari terakhir
                     }
                 } else if !tp.is_some_and(|tp| tp.moved) {
+                    self.touch_sel = false;
                     self.mouse_move(pos.0, pos.1);
                     self.press();
                     self.release();
@@ -3953,6 +3974,7 @@ impl App {
     fn long_press(&mut self) {
         let Some(tp) = self.tap.as_mut() else { return };
         tp.held = true;
+        self.touch_sel = true;
         let (x, y) = tp.start;
         let geo = self.geo();
         if self.settings.is_some() || !geo.content.contains(x, y) || (self.side_open && self.narrow()) {
@@ -3976,6 +3998,55 @@ impl App {
         }
         self.menu = Some((x, y, true));
         self.redraw();
+    }
+
+    /// Titik layar (bawah caret) awal dan akhir seleksi sentuh, untuk pegangannya.
+    fn sel_handles(&mut self) -> Option<[(f32, f32); 2]> {
+        if !self.touch_sel || !self.has_selection() || self.settings.is_some() || self.zoom.is_some() {
+            return None;
+        }
+        self.layout_views();
+        let (ox, oy) = self.ed_origin(&self.geo());
+        let pt = |lay: &Lay, x0: f32, y0: f32, i: usize| {
+            let (x, top, h) = lay.caret(i);
+            (ox + x0 + x, oy + y0 + top + h)
+        };
+        Some(match self.mode {
+            Mode::Edit => {
+                let (a, b) = self.doc.selection();
+                [a, b].map(|i| {
+                    let (x, top, h) = self.ed.caret(i);
+                    (ox + x, oy + top + h)
+                })
+            }
+            Mode::Read => {
+                let (a, b) = self.rd.sel?;
+                let (a, b) = if a <= b { (a, b) } else { (b, a) };
+                let f = |(k, i): (usize, usize)| {
+                    let (x, y, lay) = &self.rd.items[k];
+                    pt(lay, *x, *y, i)
+                };
+                [f(a), f(b)]
+            }
+        })
+    }
+
+    /// Mulai menarik pegangan `j` (0 = awal, 1 = akhir): ujung lain jadi jangkar.
+    fn grab_handle(&mut self, j: usize) {
+        match self.mode {
+            Mode::Edit => {
+                let (a, b) = self.doc.selection();
+                let (anchor, head) = if j == 0 { (b, a) } else { (a, b) };
+                self.doc.set_selection(anchor, head);
+                self.drag = Some(Drag::Editor);
+            }
+            Mode::Read => {
+                let Some((a, b)) = self.rd.sel else { return };
+                let (a, b) = if a <= b { (a, b) } else { (b, a) };
+                self.rd.sel = Some(if j == 0 { (b, a) } else { (a, b) });
+                self.drag = Some(Drag::Read);
+            }
+        }
     }
 
     /// Lapisan yang bisa ditutup tombol back: catatan terbuka di atas daftar
@@ -4449,6 +4520,13 @@ impl App {
             );
         }
         let _ = lw;
+        if let Some(hs) = self.sel_handles() {
+            let r = (7.0 * s).round();
+            for (x, y) in hs {
+                p.rect(Rect::new((x - s).round(), (y - 4.0 * s).round(), (2.0 * s).round(), (4.0 * s).round()), t.accent);
+                p.rrect(Rect::new((x - r).round(), y.round(), 2.0 * r, 2.0 * r), r, t.accent);
+            }
+        }
         self.paint_menu(p, &hits);
         if self.settings.is_some() {
             let hits = self.frame_hits.clone();

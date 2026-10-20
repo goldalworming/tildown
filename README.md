@@ -15,8 +15,8 @@ Built from scratch in Rust on **wgpu + winit**. One codebase runs on desktop and
   - Type to filter your notes.
   - Enter opens the top match, or creates a new note if nothing matches.
   - Matches are highlighted inside the note. Step through them with F3 or Shift+F3.
-- **Context menu**: right-click, or long-press on a phone, for Cut, Copy, Paste and Select all. On a phone, long-press selects a word; keep holding and drag to select more.
-- **Tags**: write `#tag` anywhere in a note (`#kajian`, `#work/meeting`). In read mode, click a tag to list every note with that tag. Add words after it, like `#kajian doa`, to search only within those notes.
+- **Context menu**: right-click, or long-press on a phone, for Cut, Copy, Paste and Select all. On a phone, long-press selects a word; drag the handles at either end to change the selection.
+- **Tags**: write `#tag` anywhere in a note (`#recipes`, `#work/meeting`). In read mode, click a tag to list every note with that tag. Add words after it, like `#recipes pasta`, to search only within those notes.
 - **Editor**: markdown highlighting in the style of iA Writer, list and task continuation, undo/redo, and IME input.
 - **Read mode**:
   - Headings, lists, task checkboxes you can click, quotes, code blocks, tables, local images and links. Plain https:// addresses become links too, and web links get a ↗ icon; click to open them in the browser.
@@ -28,7 +28,7 @@ Built from scratch in Rust on **wgpu + winit**. One codebase runs on desktop and
 - **Import**: drop `.md` or `.txt` files onto the window to add each one as a new note. The original file is left unchanged. Works in the desktop app and on the web.
 - **Sync** across devices through your own Cloudflare Worker on the free plan, so your notes never pass through anyone else's server. See [Sync](#sync).
 - **Chinese, Japanese and Korean**: the desktop app uses the system font (Microsoft YaHei / Malgun Gothic on Windows, Hiragino / Apple SD Gothic on macOS). The web app downloads Noto Sans SC (8 MB) the first time it is needed, so Korean is not covered on the web.
-- **Emoji** in color, including combined emoji (👨‍👩‍👧, 👋🏽) and flags (🇮🇩).
+- **Emoji** in color, including combined emoji (👨‍👩‍👧, 👋🏽) and flags (🇪🇺 🇺🇳).
 - **Arabic**: write Arabic, or Arabic mixed with Latin text, in the same note. It is drawn with the DigitalKhatt font, including harakat. Words are shaped with [rustybuzz](https://github.com/harfbuzz/rustybuzz). Paragraphs that start with Arabic run right to left and are aligned right.
 - **Trash**: deleted notes can be restored for 30 days.
 - **Settings**: light, dark or system theme, text size, line width, and whether notes open in edit or read mode. **Check for updates** shows when a newer release is available; on Windows and macOS, **Update** downloads and installs it in place, then **Restart** (no setup or dmg needed). In the web app, **Update** reloads the latest version.
@@ -108,7 +108,7 @@ If you deployed the server before sharing existed, update it: in the GitHub repo
 Claude can read, search, create and edit your notes through the sync server (MCP):
 1. In TilDown → Settings → Sync, press **Connect Claude (copy link)**.
 2. In Claude (claude.ai, desktop or phone app): Settings → Connectors → **Add custom connector**, and paste the link.
-3. Ask things like "find my notes tagged #kajian" or "add this to my shopping list".
+3. Ask things like "find my notes tagged #recipes" or "add this to my shopping list".
 
 To point Claude at one note, right-click (or long-press) in it, press **Copy note reference**, and paste that into the chat, e.g. "read tildown:20261018-171034 (Shopping list)".
 
@@ -184,7 +184,7 @@ src/
   web.rs        wasm: OPFS mirror, clipboard, links
 web/            index.html and build script
 server/         sync server: Cloudflare Worker + Durable Object
-docs/PRD.md     product requirements (Indonesian)
+docs/PRD.md     product requirements
 ```
 
 ## Credits
