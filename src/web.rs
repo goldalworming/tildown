@@ -80,9 +80,9 @@ let kb, kbOn = false, kbCb;
 export function clip_read() {
   navigator.clipboard?.readText().then(t => kbCb(7, t), () => kbCb(7, ''));
 }
-// Menu konteks "Paste": tempel seperti Ctrl+V (jenis 6).
-export function clip_paste() {
-  navigator.clipboard?.readText().then(t => t && kbCb(6, t), () => {});
+// Menu konteks "Paste" (jenis 6) / "Paste as quote" (jenis 9).
+export function clip_paste(k) {
+  navigator.clipboard?.readText().then(t => t && kbCb(k, t), () => {});
 }
 // Tombol back HP/browser: tiap lapisan (catatan di atas daftar, Settings,
 // penampil) = satu entri riwayat. Back menutup lapisan teratas (jenis 8).
@@ -144,9 +144,13 @@ export function kb_init(cb) {
   });
   // Ctrl+V tidak diteruskan ke winit (yang mencegah default keydown), supaya
   // browser mengirim `paste` berisi clipboard sistem: teks (jenis 6) atau gambar.
+  // Ctrl+Shift+V: tempel sebagai kutipan (jenis 9).
+  let quote = false;
   addEventListener('keydown', e => {
-    if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 'v' && e.target !== kb)
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 'v' && e.target !== kb) {
+      quote = e.shiftKey;
       e.stopImmediatePropagation();
+    }
   }, true);
   document.addEventListener('paste', e => {
     const f = [...e.clipboardData.files].find(isImg);
@@ -154,7 +158,8 @@ export function kb_init(cb) {
     if (e.target === kb) return; // teks lewat `input` textarea
     e.preventDefault();
     const t = e.clipboardData.getData('text/plain');
-    if (t) cb(6, t);
+    if (t) cb(quote ? 9 : 6, t);
+    quote = false;
   });
 }
 let imgCb;
@@ -195,7 +200,7 @@ extern "C" {
     pub fn download(name: &str, bytes: &[u8]);
     pub fn kb_editing(on: bool);
     pub fn clip_read();
-    pub fn clip_paste();
+    pub fn clip_paste(k: u32);
     pub fn nav_depth(n: u32);
     #[wasm_bindgen(js_name = kb_init)]
     fn kb_init_js(cb: &Closure<dyn FnMut(u8, String)>);

@@ -2072,9 +2072,9 @@ pub struct App {
     /// Kedalaman lapisan yang terakhir dilaporkan ke riwayat browser (web).
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     nav: u32,
-    /// Dua catatan yang terakhir ditulis (terbaru dulu): tujuan Snip (Ctrl+Shift+C).
-    snip_to: Vec<String>,
-    /// Split: catatan di panel yang tidak aktif (juga tujuan Snip).
+    /// Teks yang terakhir disalin dan judul catatan asalnya.
+    copied: Option<(String, String)>,
+    /// Split: catatan di panel yang tidak aktif.
     pane: Option<Pane>,
     /// Catatan aktif ada di panel kanan.
     right: bool,
@@ -2241,7 +2241,7 @@ impl App {
             nav: 0,
             glide: None,
             menu: None,
-            snip_to: Vec::new(),
+            copied: None,
             pane: None,
             right: false,
             touch_sel: false,
@@ -2457,11 +2457,6 @@ impl App {
             let now = Instant::now();
             let since = *self.dirty_since.get_or_insert(now);
             self.save_due = Some((now + SAVE_DELAY).min(since + SAVE_MAX));
-            let id = &self.store.notes[self.cur].id;
-            if self.snip_to.first() != Some(id) {
-                self.snip_to.insert(0, id.clone());
-                self.snip_to.truncate(2);
-            }
         }
         self.set_title();
     }
@@ -3001,7 +2996,8 @@ impl App {
                 self.pane = match self.pane {
                     Some(_) => None,
                     None => {
-                        let i = self.snip_target();
+                        let other = self.res.iter().copied().find(|&i| i != self.cur);
+                        let i = other.unwrap_or_else(|| self.store.create(""));
                         let doc = Doc::new(&self.store.notes[i].text);
                         Some(Pane {
                             id: self.store.notes[i].id.clone(),
@@ -3367,7 +3363,16 @@ impl App {
                     && clip_get().is_none_or(|t| t.is_empty())
                     && self.paste_image() => {}
                 "n" => self.new_note(""),
-                "c" if shift && self.focus != Focus::Search && self.has_selection() => self.snip(),
+                "c" | "x" if self.focus == Focus::Editor && self.has_selection() => {
+                    self.note_copy();
+                    self.key_focused(&ev, ctrl, shift)
+                }
+                // Web: Ctrl+V tidak sampai ke sini (lewat event `paste`, jenis 9).
+                "v" if shift && self.focus == Focus::Editor => {
+                    if let Some(t) = clip_get() {
+                        self.paste_quote(t);
+                    }
+                }
                 "l" if shift && self.focus == Focus::Editor && self.mode == Mode::Edit => {
                     self.key_focused(&ev, ctrl, shift)
                 }
@@ -4301,11 +4306,9 @@ impl App {
         }
         if self.mode == Mode::Edit {
             v.push((2, "Paste", "Ctrl+V"));
+            v.push((5, "Paste as quote", "Ctrl+Shift+V"));
         }
         v.push((3, "Select all", "Ctrl+A"));
-        if sel {
-            v.push((5, "Snip to note", "Ctrl+Shift+C"));
-        }
         if self.sync.on() {
             v.push((4, "Copy note reference", "")); // untuk Claude: "baca tildown:…"
         }
@@ -4316,7 +4319,7 @@ impl App {
         let Some((x, y, touch)) = self.menu else { return Vec::new() };
         let s = self.s;
         let items = self.menu_items();
-        let (iw, ih) = ((180.0 * s).round(), (36.0 * s).round());
+        let (iw, ih) = ((220.0 * s).round(), (36.0 * s).round());
         let h = ih * items.len() as f32 + 8.0 * s;
         // Di dalam jendela; sentuhan: di atas jari supaya tidak tertutup.
         let x = x.min(self.size.0 - iw - 8.0 * s).max(8.0 * s);
@@ -4333,16 +4336,23 @@ impl App {
         self.menu = None;
         match (i, self.mode) {
             (0, Mode::Edit) => {
+                self.note_copy();
                 clip_set(self.doc.selected_text());
                 self.doc.insert("");
                 self.changed();
             }
-            (1, Mode::Edit) => clip_set(self.doc.selected_text()),
-            (1, Mode::Read) => clip_set(&self.rd.selected_text()),
+            (1, Mode::Edit) => {
+                self.note_copy();
+                clip_set(self.doc.selected_text())
+            }
+            (1, Mode::Read) => {
+                self.note_copy();
+                clip_set(&self.rd.selected_text())
+            }
             (2, _) => {
                 // Web: clipboard dibaca async, lanjut di `Ev::Kb(6, …)` (paste_text).
                 #[cfg(target_arch = "wasm32")]
-                crate::web::clip_paste();
+                crate::web::clip_paste(6);
                 #[cfg(not(target_arch = "wasm32"))]
                 if !self.paste_image() {
                     if let Some(t) = clip_get() {
@@ -4356,7 +4366,14 @@ impl App {
                 clip_set(&format!("tildown:{id} ({})", store::title_of(&self.doc.text)));
                 self.notice = "Note reference copied. Paste it in Claude.".into();
             }
-            (5, _) => self.snip(),
+            (5, _) => {
+                #[cfg(target_arch = "wasm32")]
+                crate::web::clip_paste(9);
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Some(t) = clip_get() {
+                    self.paste_quote(t);
+                }
+            }
             (3, Mode::Edit) => self.doc.select_all(),
             (3, Mode::Read) => {
                 let n = self.rd.items.len();
@@ -4394,56 +4411,35 @@ impl App {
         }
     }
 
-    /// Ada teks terpilih di editor / mode baca.
-    /// Tambahkan teks terpilih sebagai kutipan (+ judul sumber) ke akhir
-    /// catatan tujuan (`snip_target`).
-    fn snip(&mut self) {
+    /// Catat teks yang disalin dan catatan asalnya (untuk "Paste as quote").
+    fn note_copy(&mut self) {
         let t = match self.mode {
             Mode::Edit => self.doc.selected_text().to_owned(),
             Mode::Read => self.rd.selected_text(),
         };
-        if t.trim().is_empty() {
+        self.copied = Some((t, store::title_of(&self.doc.text).to_owned()));
+    }
+
+    /// Ctrl+Shift+V: tempel sebagai kutipan di kursor; bila disalin dari
+    /// catatan di aplikasi ini, ditambah judul asalnya.
+    fn paste_quote(&mut self, t: String) {
+        clip_remember(&t);
+        let t = t.replace("\r\n", "\n");
+        if self.mode != Mode::Edit || self.focus != Focus::Editor || t.trim().is_empty() {
             return;
         }
-        let i = self.snip_target();
-        let q: Vec<String> = t.trim().lines().map(|l| format!("> {l}").trim_end().to_owned()).collect();
-        let n = &self.store.notes[i];
-        let text = format!("{}\n\n{}\n— {}\n\n", n.text.trim_end(), q.join("\n"), store::title_of(&self.doc.text));
-        self.store.set_text(i, &text);
-        match self.store.save(i) {
-            Ok(()) => {
-                self.notice = format!("Snipped to \u{201c}{}\u{201d}", self.store.notes[i].title());
-                if let Some(pn) = &mut self.pane {
-                    pn.scroll = [f32::MAX; 2]; // tampilkan cuplikan terbaru
-                }
-                self.sync_soon();
-                self.refilter();
-            }
-            Err(e) => self.status = format!("Couldn't save: {e}"),
+        let mut q: Vec<String> = t.trim().lines().map(|l| format!("> {l}").trim_end().to_owned()).collect();
+        if let Some((_, title)) = self.copied.as_ref().filter(|c| c.0.trim() == t.trim()) {
+            q.push(format!("> — {title}"));
         }
+        let a = self.doc.selection().0;
+        let nl = if a == 0 || self.doc.text[..a].ends_with('\n') { "" } else { "\n" };
+        self.doc.insert(&format!("{nl}{}\n\n", q.join("\n")));
+        self.changed();
+        self.reveal();
     }
 
-    /// Tujuan Snip: catatan di panel kanan, atau yang terakhir ditulis selain
-    /// catatan ini; belum ada → "Snippets <tanggal>" (dibuat bila perlu).
-    fn snip_target(&mut self) -> usize {
-        let src = &self.store.notes[self.cur].id;
-        let pane = self.pane.as_ref().map(|pn| &pn.id).filter(|id| *id != src);
-        if let Some(i) = pane.and_then(|id| self.store.notes.iter().position(|n| &n.id == id)) {
-            return i;
-        }
-        let d = store::stamp(SystemTime::now());
-        let day = format!("Snippets {}-{}-{}", &d[..4], &d[4..6], &d[6..8]);
-        let to = self.snip_to.iter().find(|id| *id != src).cloned();
-        let i = match self.store.notes.iter().position(|n| Some(&n.id) == to.as_ref() || to.is_none() && n.title() == day) {
-            Some(i) => i,
-            None => self.store.create(&format!("# {day}\n")),
-        };
-        if to.is_none() {
-            self.snip_to.push(self.store.notes[i].id.clone());
-        }
-        i
-    }
-
+    /// Ada teks terpilih di editor / mode baca.
     fn has_selection(&self) -> bool {
         match self.mode {
             Mode::Edit => self.doc.selection().0 != self.doc.selection().1,
@@ -5471,7 +5467,7 @@ impl App {
         std::mem::swap(&mut self.want_x, &mut pn.want_x);
         std::mem::swap(&mut self.words, &mut pn.words);
         (self.cur, self.right) = (i, !self.right);
-        // Berubah dari luar (Snip, sync) selagi tidak aktif: muat ulang.
+        // Berubah dari luar (sync) selagi tidak aktif: muat ulang.
         // ponytail: dibandingkan tiap frame; murah untuk catatan biasa.
         let text = &self.store.notes[i].text;
         if self.doc.version == self.saved_ver && self.doc.text != *text {
@@ -5655,6 +5651,11 @@ impl ApplicationHandler<Ev> for App {
             Ev::Kb(5, s) => return self.import_note(&s),
             Ev::Kb(6, s) => return self.paste_text(s),
             Ev::Kb(7, s) => return self.paste_code(s),
+            Ev::Kb(9, s) => {
+                self.paste_quote(s);
+                self.redraw();
+                return;
+            }
             Ev::Kb(8, _) => {
                 self.back();
                 return self.redraw();
