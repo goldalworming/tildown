@@ -144,7 +144,7 @@ Notes on security:
 | Ctrl+B / Ctrl+I / Ctrl+K | Bold / italic / link (a URL on the clipboard fills the link) |
 | Tab / Shift+Tab | Indent / outdent the selected lines |
 | Ctrl+Shift+D | Duplicate the line (or the selection) |
-| Ctrl+Shift+C | Snip: append the selection as a quote (with its source title) to the note in the right pane, or else the note you last wrote in |
+| Ctrl+Shift+C | Snip: append the selection as a quote (with its source title) to the note in the other pane (split view), or else the note you last wrote in |
 | `(` `[` `"` `*` `_` … with a selection | Wrap the selection |
 | Double-click, then drag | Select by whole words |
 | Ctrl+D | Select the word, then add its next occurrence (multi-cursor) |

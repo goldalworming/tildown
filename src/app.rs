@@ -2074,14 +2074,24 @@ pub struct App {
     nav: u32,
     /// Dua catatan yang terakhir ditulis (terbaru dulu): tujuan Snip (Ctrl+Shift+C).
     snip_to: Vec<String>,
-    /// Panel kanan: catatan kedua (baca saja), juga tujuan Snip.
+    /// Split: catatan di panel yang tidak aktif (juga tujuan Snip).
     pane: Option<Pane>,
+    /// Catatan aktif ada di panel kanan.
+    right: bool,
 }
 
+/// Status catatan di panel yang tidak aktif; ditukar dengan milik `App`
+/// (`swap_pane`) saat panel itu diklik atau digambar.
 struct Pane {
     id: String,
+    doc: Doc,
+    saved_ver: u64,
+    mode: Mode,
+    scroll: [f32; 2],
+    ed: EdView,
     rd: RdView,
-    scroll: f32,
+    want_x: Option<f32>,
+    words: (u64, usize),
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2233,6 +2243,7 @@ impl App {
             menu: None,
             snip_to: Vec::new(),
             pane: None,
+            right: false,
             touch_sel: false,
             notice: String::new(),
             focused: true,
@@ -2293,12 +2304,14 @@ impl App {
         if i == self.cur {
             return;
         }
+        // Sudah terbuka di panel lain: pindah ke sana.
+        if self.pane.as_ref().is_some_and(|pn| pn.id == self.store.notes[i].id) {
+            self.save_now();
+            self.swap_pane();
+            return;
+        }
         self.save_now();
         let c = &self.store.notes[self.cur];
-        // Catatan di panel kanan dibuka: tukar tempat.
-        if let Some(pn) = self.pane.as_mut().filter(|pn| pn.id == self.store.notes[i].id) {
-            *pn = Pane { id: c.id.clone(), rd: RdView::default(), scroll: 0.0 };
-        }
         // Catatan baru yang ditinggalkan kosong tidak meninggalkan jejak.
         if !c.on_disk && c.text.trim().is_empty() {
             self.store.notes.remove(self.cur);
@@ -2377,7 +2390,8 @@ impl App {
         }
         self.sync_soon();
         self.refilter();
-        let i = match self.res.first() {
+        let pane = self.pane.as_ref().map(|pn| &pn.id);
+        let i = match self.res.iter().find(|&&i| Some(&self.store.notes[i].id) != pane) {
             Some(&i) => i,
             None => self.store.create(""),
         };
@@ -2732,8 +2746,11 @@ impl App {
         };
         let bh = (BAR_H * s).round();
         let fh = if self.query().is_empty() { 0.0 } else { (40.0 * s).round() };
+        // Split: kiri `lw`, kanan `pw`; `content` = panel aktif, `pane` = yang lain.
         let pw = if self.pane.is_some() && !self.narrow() { ((w - sw) / 2.0).round() } else { 0.0 };
-        let content = Rect::new(sw, bh, (w - sw - pw).max(1.0), (h - bh - fh).max(1.0));
+        let lw = (w - sw - pw).max(1.0);
+        let (cx, cw, px, pww) = if self.right && pw > 0.0 { (sw + lw, pw, sw, lw) } else { (sw, lw, sw + lw, pw) };
+        let content = Rect::new(cx, bh, cw, (h - bh - fh).max(1.0));
         let col_w = (self.col * s)
             .min(content.w - 2.0 * GUTTER * s)
             .max(40.0 * s)
@@ -2751,7 +2768,7 @@ impl App {
         };
         let foot = (53.0 * s).round() + if self.query().is_empty() { 0.0 } else { (40.0 * s).round() };
         Geo {
-            pane: Rect::new(w - pw, bh, pw, h - bh),
+            pane: Rect::new(px, bh, pww, h - bh),
             side: Rect::new(0.0, 0.0, sw, h),
             search,
             list: Rect::new(0.0, ly, sw, (h - ly - foot).max(1.0)),
@@ -2980,11 +2997,23 @@ impl App {
             Btn::Mode => self.toggle_mode(),
             Btn::Delete => self.delete_note(),
             Btn::Split => {
+                self.right = false;
                 self.pane = match self.pane {
                     Some(_) => None,
                     None => {
                         let i = self.snip_target();
-                        Some(Pane { id: self.store.notes[i].id.clone(), rd: RdView::default(), scroll: f32::MAX })
+                        let doc = Doc::new(&self.store.notes[i].text);
+                        Some(Pane {
+                            id: self.store.notes[i].id.clone(),
+                            saved_ver: doc.version,
+                            doc,
+                            mode: self.open_in,
+                            scroll: [f32::MAX; 2],
+                            ed: EdView::default(),
+                            rd: RdView::default(),
+                            want_x: None,
+                            words: (u64::MAX, 0),
+                        })
                     }
                 }
             }
@@ -3174,20 +3203,6 @@ impl App {
         let geo = self.geo();
         let cs = self.cs();
         let Some(f) = self.fonts.as_mut() else { return };
-        if let Some(pn) = self.pane.as_mut().filter(|_| geo.pane.w > 0.0) {
-            match self.store.notes.iter().find(|n| n.id == pn.id) {
-                Some(n) => {
-                    let ns = n.mtime.duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
-                    let key = Some((ns ^ n.text.len() as u64, geo.pane.w.to_bits(), cs.to_bits(), self.theme.dark));
-                    if pn.rd.key != key {
-                        let w = geo.pane.w - 2.0 * GUTTER * self.s;
-                        pn.rd = build_read(&n.text, f, w.min(self.col * self.s), w, cs, &self.theme, &mut self.imgs, &self.store.dir);
-                        pn.rd.key = key;
-                    }
-                }
-                None => pn.rd = RdView::default(),
-            }
-        }
         match self.mode {
             Mode::Edit => self.ed.build(&self.doc, f, geo.col_w, cs, &self.theme),
             Mode::Read => {
@@ -3737,14 +3752,7 @@ impl App {
         }
         self.dia_press = None;
         let geo = self.geo();
-        if let Some(i) = self.pane.as_ref().filter(|_| geo.pane.contains(x, y)).and_then(|pn| self.store.notes.iter().position(|n| n.id == pn.id)) {
-            self.open_note(i);
-            (self.mode, self.focus) = (Mode::Edit, Focus::Editor);
-            self.doc.set_cursor(self.doc.text.len(), false);
-            self.reveal();
-            self.redraw();
-            return;
-        }
+        let geo = if self.focus_pane_at(x, y) { self.geo() } else { geo };
         let shift = self.mods.shift_key();
         let now = Instant::now();
         let (t0, n, (x0, y0)) = self.clicks;
@@ -4260,6 +4268,7 @@ impl App {
     /// seleksi), lalu buka menu konteks.
     fn right_click(&mut self) {
         let (x, y) = self.mouse;
+        self.focus_pane_at(x, y);
         let geo = self.geo();
         if self.settings.is_some() || self.zoom.is_some() || !geo.content.contains(x, y) {
             return;
@@ -4399,13 +4408,13 @@ impl App {
         let i = self.snip_target();
         let q: Vec<String> = t.trim().lines().map(|l| format!("> {l}").trim_end().to_owned()).collect();
         let n = &self.store.notes[i];
-        let text = format!("{}\n\n{}\n— {}\n", n.text.trim_end(), q.join("\n"), store::title_of(&self.doc.text));
+        let text = format!("{}\n\n{}\n— {}\n\n", n.text.trim_end(), q.join("\n"), store::title_of(&self.doc.text));
         self.store.set_text(i, &text);
         match self.store.save(i) {
             Ok(()) => {
                 self.notice = format!("Snipped to \u{201c}{}\u{201d}", self.store.notes[i].title());
                 if let Some(pn) = &mut self.pane {
-                    pn.scroll = f32::MAX; // tampilkan cuplikan terbaru
+                    pn.scroll = [f32::MAX; 2]; // tampilkan cuplikan terbaru
                 }
                 self.sync_soon();
                 self.refilter();
@@ -4598,9 +4607,10 @@ impl App {
             MouseScrollDelta::PixelDelta(p) => (-p.y as f32, p.y.abs() >= 50.0),
         };
         let (x, y) = self.mouse;
-        let in_pane = self.geo().pane.contains(x, y);
-        if let Some(pn) = self.pane.as_mut().filter(|_| in_pane) {
-            pn.scroll = pn.scroll.max(0.0) + dy; // dibatasi saat digambar
+        // ponytail: panel tak aktif digulir tanpa animasi.
+        if self.geo().pane.contains(x, y) && self.swap_pane() {
+            self.scroll_by(false, dy);
+            self.swap_pane();
             self.redraw();
             return;
         }
@@ -5423,25 +5433,64 @@ impl App {
         p.text(r.x + 34.0 * s, base, Face::Regular, px, hint, t.dim, tw + 1.0);
     }
 
-    /// Panel kanan: dilukis `paint_read` dengan tampilan & gulir milik panel
-    /// (ditukar sementara dengan milik catatan utama).
+    /// Panel tak aktif: tukar statusnya ke `App`, gambar seperti biasa (tanpa
+    /// caret), tukar kembali.
     fn paint_pane(&mut self, p: &mut P, geo: &Geo) {
-        let Some(mut pn) = self.pane.take().filter(|_| geo.pane.w > 0.0) else { return };
-        let (s, r) = (self.s, geo.pane);
-        p.g.set_clip(None);
-        p.rect(Rect::new(r.x, r.y, p.lw(), r.h), self.theme.border);
-        pn.scroll = pn.scroll.clamp(0.0, (pn.rd.h + (TOP + BOTTOM) * s - r.h).max(0.0));
-        let col_w = (r.w - 2.0 * GUTTER * s).min(self.col * s).round();
-        let g = Geo { content: r, col_x: (r.x + (r.w - col_w) / 2.0).round(), col_w, ..*geo };
-        let m = self.mode as usize;
-        std::mem::swap(&mut self.rd, &mut pn.rd);
-        std::mem::swap(&mut self.scroll[m], &mut pn.scroll);
+        if geo.pane.w <= 0.0 || !self.swap_pane() {
+            return;
+        }
+        let focus = std::mem::replace(&mut self.focus, Focus::Search);
         let hot = self.hot.2.take();
-        self.paint_read(p, &g);
-        self.hot.2 = hot;
+        self.clamp_scroll();
+        let g = self.geo();
+        match self.mode {
+            Mode::Edit => self.paint_editor(p, &g),
+            Mode::Read => self.paint_read(p, &g),
+        }
+        (self.focus, self.hot.2) = (focus, hot);
+        self.swap_pane();
+        p.g.set_clip(None);
+        let x = geo.content.x.max(geo.pane.x);
+        p.rect(Rect::new(x, geo.pane.y, p.lw(), geo.pane.h), self.theme.border);
+    }
+
+    /// Tukar status catatan aktif dengan panel lain; posisi di layar tetap.
+    fn swap_pane(&mut self) -> bool {
+        let Some(pn) = self.pane.as_mut() else { return false };
+        let Some(i) = self.store.notes.iter().position(|n| n.id == pn.id) else {
+            (self.pane, self.right) = (None, false); // catatannya hilang
+            return false;
+        };
+        pn.id = self.store.notes[self.cur].id.clone();
+        std::mem::swap(&mut self.doc, &mut pn.doc);
+        std::mem::swap(&mut self.saved_ver, &mut pn.saved_ver);
+        std::mem::swap(&mut self.mode, &mut pn.mode);
+        std::mem::swap(&mut self.scroll, &mut pn.scroll);
+        std::mem::swap(&mut self.ed, &mut pn.ed);
         std::mem::swap(&mut self.rd, &mut pn.rd);
-        std::mem::swap(&mut self.scroll[m], &mut pn.scroll);
-        self.pane = Some(pn);
+        std::mem::swap(&mut self.want_x, &mut pn.want_x);
+        std::mem::swap(&mut self.words, &mut pn.words);
+        (self.cur, self.right) = (i, !self.right);
+        // Berubah dari luar (Snip, sync) selagi tidak aktif: muat ulang.
+        // ponytail: dibandingkan tiap frame; murah untuk catatan biasa.
+        let text = &self.store.notes[i].text;
+        if self.doc.version == self.saved_ver && self.doc.text != *text {
+            self.doc = Doc::new(text);
+            self.saved_ver = self.doc.version;
+            (self.ed, self.rd, self.words.0) = (EdView::default(), RdView::default(), u64::MAX);
+        }
+        true
+    }
+
+    /// Klik di panel tak aktif: jadikan aktif.
+    fn focus_pane_at(&mut self, x: f32, y: f32) -> bool {
+        if !self.geo().pane.contains(x, y) {
+            return false;
+        }
+        self.save_now();
+        self.swap_pane();
+        self.set_title();
+        true
     }
 
     fn paint_read(&mut self, p: &mut P, geo: &Geo) {
