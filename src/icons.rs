@@ -10,13 +10,14 @@ use crate::vector::{self, Pt};
 /// (titik, tertutup?)
 pub type Shape = Vec<(Vec<Pt>, bool)>;
 
-const SRC: [(&str, &str); 23] = [
+const SRC: [(&str, &str); 24] = [
     ("chevron-down", include_str!("../assets/icons/chevron-down.svg")),
     ("chevron-up", include_str!("../assets/icons/chevron-up.svg")),
     ("book-open", include_str!("../assets/icons/book-open.svg")),
     ("circle-alert", include_str!("../assets/icons/circle-alert.svg")),
     ("download", include_str!("../assets/icons/download.svg")),
     ("file-text", include_str!("../assets/icons/file-text.svg")),
+    ("columns-2", include_str!("../assets/icons/columns-2.svg")),
     ("link", include_str!("../assets/icons/link.svg")),
     ("link-2-off", include_str!("../assets/icons/link-2-off.svg")),
     ("maximize-2", include_str!("../assets/icons/maximize-2.svg")),

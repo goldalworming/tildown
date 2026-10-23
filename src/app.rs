@@ -241,6 +241,8 @@ enum Btn {
     Unshare,
     /// Menu konteks (klik kanan / tekan lama): 0 Cut, 1 Copy, 2 Paste, 3 Select all.
     Menu(u8),
+    /// Toolbar: buka/tutup panel kanan.
+    Split,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -419,7 +421,10 @@ fn bar(area: Rect, total: f32, scroll: f32, s: f32) -> Option<Bar> {
     })
 }
 
+#[derive(Clone, Copy)]
 struct Geo {
+    /// Panel kanan (split); lebar 0 bila tertutup.
+    pane: Rect,
     /// Sidebar; lebar 0 bila disembunyikan.
     side: Rect,
     /// Kotak input pencarian; tinggi 0 bila pencarian tertutup.
@@ -2069,6 +2074,14 @@ pub struct App {
     nav: u32,
     /// Dua catatan yang terakhir ditulis (terbaru dulu): tujuan Snip (Ctrl+Shift+C).
     snip_to: Vec<String>,
+    /// Panel kanan: catatan kedua (baca saja), juga tujuan Snip.
+    pane: Option<Pane>,
+}
+
+struct Pane {
+    id: String,
+    rd: RdView,
+    scroll: f32,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2219,6 +2232,7 @@ impl App {
             glide: None,
             menu: None,
             snip_to: Vec::new(),
+            pane: None,
             touch_sel: false,
             notice: String::new(),
             focused: true,
@@ -2281,6 +2295,10 @@ impl App {
         }
         self.save_now();
         let c = &self.store.notes[self.cur];
+        // Catatan di panel kanan dibuka: tukar tempat.
+        if let Some(pn) = self.pane.as_mut().filter(|pn| pn.id == self.store.notes[i].id) {
+            *pn = Pane { id: c.id.clone(), rd: RdView::default(), scroll: 0.0 };
+        }
         // Catatan baru yang ditinggalkan kosong tidak meninggalkan jejak.
         if !c.on_disk && c.text.trim().is_empty() {
             self.store.notes.remove(self.cur);
@@ -2714,7 +2732,8 @@ impl App {
         };
         let bh = (BAR_H * s).round();
         let fh = if self.query().is_empty() { 0.0 } else { (40.0 * s).round() };
-        let content = Rect::new(sw, bh, (w - sw).max(1.0), (h - bh - fh).max(1.0));
+        let pw = if self.pane.is_some() && !self.narrow() { ((w - sw) / 2.0).round() } else { 0.0 };
+        let content = Rect::new(sw, bh, (w - sw - pw).max(1.0), (h - bh - fh).max(1.0));
         let col_w = (self.col * s)
             .min(content.w - 2.0 * GUTTER * s)
             .max(40.0 * s)
@@ -2732,6 +2751,7 @@ impl App {
         };
         let foot = (53.0 * s).round() + if self.query().is_empty() { 0.0 } else { (40.0 * s).round() };
         Geo {
+            pane: Rect::new(w - pw, bh, pw, h - bh),
             side: Rect::new(0.0, 0.0, sw, h),
             search,
             list: Rect::new(0.0, ly, sw, (h - ly - foot).max(1.0)),
@@ -2818,6 +2838,9 @@ impl App {
         let px = 14.0 * s;
         let mut x = w - 16.0 * s;
         let mut bs = vec![(Btn::Delete, "Delete"), (Btn::Mode, self.mode_label())];
+        if !self.narrow() {
+            bs.push((Btn::Split, ""));
+        }
         if self.sync.on() {
             match self.sync.shares.contains_key(&self.store.notes[self.cur].id) {
                 true => bs.extend([Btn::Unshare, Btn::CopyLink].map(|b| (b, self.share_look(b).1))),
@@ -2826,7 +2849,7 @@ impl App {
         }
         for (b, label) in bs {
             // Layar HP: tombol share cukup ikon.
-            let icon_only = self.narrow() && matches!(b, Btn::Share | Btn::CopyLink | Btn::Unshare);
+            let icon_only = label.is_empty() || self.narrow() && matches!(b, Btn::Share | Btn::CopyLink | Btn::Unshare);
             let bw = if icon_only { 32.0 * s } else { (28.0 + 16.0) * s + self.tw(Face::Medium, px, label) };
             x -= bw;
             v.push((Rect::new(x.round(), (8.0 * s).round(), bw.round(), (32.0 * s).round()), b));
@@ -2956,6 +2979,15 @@ impl App {
             Btn::Settings => self.open_settings(0),
             Btn::Mode => self.toggle_mode(),
             Btn::Delete => self.delete_note(),
+            Btn::Split => {
+                self.pane = match self.pane {
+                    Some(_) => None,
+                    None => {
+                        let i = self.snip_target();
+                        Some(Pane { id: self.store.notes[i].id.clone(), rd: RdView::default(), scroll: f32::MAX })
+                    }
+                }
+            }
             Btn::Menu(i) => self.menu_do(i),
             Btn::Share => self.share(true),
             Btn::Unshare => self.share(false),
@@ -3142,6 +3174,20 @@ impl App {
         let geo = self.geo();
         let cs = self.cs();
         let Some(f) = self.fonts.as_mut() else { return };
+        if let Some(pn) = self.pane.as_mut().filter(|_| geo.pane.w > 0.0) {
+            match self.store.notes.iter().find(|n| n.id == pn.id) {
+                Some(n) => {
+                    let ns = n.mtime.duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
+                    let key = Some((ns ^ n.text.len() as u64, geo.pane.w.to_bits(), cs.to_bits(), self.theme.dark));
+                    if pn.rd.key != key {
+                        let w = geo.pane.w - 2.0 * GUTTER * self.s;
+                        pn.rd = build_read(&n.text, f, w.min(self.col * self.s), w, cs, &self.theme, &mut self.imgs, &self.store.dir);
+                        pn.rd.key = key;
+                    }
+                }
+                None => pn.rd = RdView::default(),
+            }
+        }
         match self.mode {
             Mode::Edit => self.ed.build(&self.doc, f, geo.col_w, cs, &self.theme),
             Mode::Read => {
@@ -3691,6 +3737,14 @@ impl App {
         }
         self.dia_press = None;
         let geo = self.geo();
+        if let Some(i) = self.pane.as_ref().filter(|_| geo.pane.contains(x, y)).and_then(|pn| self.store.notes.iter().position(|n| n.id == pn.id)) {
+            self.open_note(i);
+            (self.mode, self.focus) = (Mode::Edit, Focus::Editor);
+            self.doc.set_cursor(self.doc.text.len(), false);
+            self.reveal();
+            self.redraw();
+            return;
+        }
         let shift = self.mods.shift_key();
         let now = Instant::now();
         let (t0, n, (x0, y0)) = self.clicks;
@@ -4332,8 +4386,8 @@ impl App {
     }
 
     /// Ada teks terpilih di editor / mode baca.
-    /// Tambahkan teks terpilih sebagai kutipan (+ judul sumber) ke akhir catatan
-    /// yang terakhir ditulis selain catatan ini; belum ada → "Snippets <tanggal>".
+    /// Tambahkan teks terpilih sebagai kutipan (+ judul sumber) ke akhir
+    /// catatan tujuan (`snip_target`).
     fn snip(&mut self) {
         let t = match self.mode {
             Mode::Edit => self.doc.selected_text().to_owned(),
@@ -4342,7 +4396,32 @@ impl App {
         if t.trim().is_empty() {
             return;
         }
+        let i = self.snip_target();
+        let q: Vec<String> = t.trim().lines().map(|l| format!("> {l}").trim_end().to_owned()).collect();
+        let n = &self.store.notes[i];
+        let text = format!("{}\n\n{}\n— {}\n", n.text.trim_end(), q.join("\n"), store::title_of(&self.doc.text));
+        self.store.set_text(i, &text);
+        match self.store.save(i) {
+            Ok(()) => {
+                self.notice = format!("Snipped to \u{201c}{}\u{201d}", self.store.notes[i].title());
+                if let Some(pn) = &mut self.pane {
+                    pn.scroll = f32::MAX; // tampilkan cuplikan terbaru
+                }
+                self.sync_soon();
+                self.refilter();
+            }
+            Err(e) => self.status = format!("Couldn't save: {e}"),
+        }
+    }
+
+    /// Tujuan Snip: catatan di panel kanan, atau yang terakhir ditulis selain
+    /// catatan ini; belum ada → "Snippets <tanggal>" (dibuat bila perlu).
+    fn snip_target(&mut self) -> usize {
         let src = &self.store.notes[self.cur].id;
+        let pane = self.pane.as_ref().map(|pn| &pn.id).filter(|id| *id != src);
+        if let Some(i) = pane.and_then(|id| self.store.notes.iter().position(|n| &n.id == id)) {
+            return i;
+        }
         let d = store::stamp(SystemTime::now());
         let day = format!("Snippets {}-{}-{}", &d[..4], &d[4..6], &d[6..8]);
         let to = self.snip_to.iter().find(|id| *id != src).cloned();
@@ -4353,18 +4432,7 @@ impl App {
         if to.is_none() {
             self.snip_to.push(self.store.notes[i].id.clone());
         }
-        let q: Vec<String> = t.trim().lines().map(|l| format!("> {l}").trim_end().to_owned()).collect();
-        let n = &self.store.notes[i];
-        let text = format!("{}\n\n{}\n— {}\n", n.text.trim_end(), q.join("\n"), store::title_of(&self.doc.text));
-        self.store.set_text(i, &text);
-        match self.store.save(i) {
-            Ok(()) => {
-                self.notice = format!("Snipped to \u{201c}{}\u{201d}", self.store.notes[i].title());
-                self.sync_soon();
-                self.refilter();
-            }
-            Err(e) => self.status = format!("Couldn't save: {e}"),
-        }
+        i
     }
 
     fn has_selection(&self) -> bool {
@@ -4530,6 +4598,12 @@ impl App {
             MouseScrollDelta::PixelDelta(p) => (-p.y as f32, p.y.abs() >= 50.0),
         };
         let (x, y) = self.mouse;
+        let in_pane = self.geo().pane.contains(x, y);
+        if let Some(pn) = self.pane.as_mut().filter(|_| in_pane) {
+            pn.scroll = pn.scroll.max(0.0) + dy; // dibatasi saat digambar
+            self.redraw();
+            return;
+        }
         let Some(list) = self.scroll_area(x, y) else { return };
         if smooth {
             let rest = self.glide.as_ref().filter(|g| g.list == list).map_or(0.0, |g| g.rest);
@@ -4660,6 +4734,7 @@ impl App {
             Mode::Edit => self.paint_editor(p, &geo),
             Mode::Read => self.paint_read(p, &geo),
         }
+        self.paint_pane(p, &geo);
         p.g.set_clip(None);
         self.paint_bar(p, &geo, &hits);
         if !self.query().is_empty() {
@@ -4721,6 +4796,10 @@ impl App {
         for &(r, btn) in hits {
             let hot = self.hot.0 == Some(btn);
             match btn {
+                Btn::Split => {
+                    self.hover_bg(p, r, btn);
+                    p.icon_in("columns-2", r, 18.0 * s, if self.pane.is_some() { t.accent } else { t.fg });
+                }
                 Btn::Side => {
                     self.hover_bg(p, r, btn);
                     let name = if self.side_open { "panel-left-close" } else { "panel-left-open" };
@@ -5342,6 +5421,27 @@ impl App {
         p.icon("mouse-pointer-2", r.x + 14.0 * s, (r.y + (ph - 12.0 * s) / 2.0).round(), 12.0 * s, t.dim);
         let base = p.base(Face::Regular, px, r.y, r.h);
         p.text(r.x + 34.0 * s, base, Face::Regular, px, hint, t.dim, tw + 1.0);
+    }
+
+    /// Panel kanan: dilukis `paint_read` dengan tampilan & gulir milik panel
+    /// (ditukar sementara dengan milik catatan utama).
+    fn paint_pane(&mut self, p: &mut P, geo: &Geo) {
+        let Some(mut pn) = self.pane.take().filter(|_| geo.pane.w > 0.0) else { return };
+        let (s, r) = (self.s, geo.pane);
+        p.g.set_clip(None);
+        p.rect(Rect::new(r.x, r.y, p.lw(), r.h), self.theme.border);
+        pn.scroll = pn.scroll.clamp(0.0, (pn.rd.h + (TOP + BOTTOM) * s - r.h).max(0.0));
+        let col_w = (r.w - 2.0 * GUTTER * s).min(self.col * s).round();
+        let g = Geo { content: r, col_x: (r.x + (r.w - col_w) / 2.0).round(), col_w, ..*geo };
+        let m = self.mode as usize;
+        std::mem::swap(&mut self.rd, &mut pn.rd);
+        std::mem::swap(&mut self.scroll[m], &mut pn.scroll);
+        let hot = self.hot.2.take();
+        self.paint_read(p, &g);
+        self.hot.2 = hot;
+        std::mem::swap(&mut self.rd, &mut pn.rd);
+        std::mem::swap(&mut self.scroll[m], &mut pn.scroll);
+        self.pane = Some(pn);
     }
 
     fn paint_read(&mut self, p: &mut P, geo: &Geo) {
