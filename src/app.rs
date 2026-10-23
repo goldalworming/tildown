@@ -386,6 +386,9 @@ enum Drag {
     Editor,
     Search,
     Read,
+    /// Seret setelah klik ganda: seleksi melebar per kata dari kata awal.
+    EditWord(usize, usize),
+    ReadWord((usize, usize), (usize, usize)),
     /// Thumb scrollbar dipegang; `grab` = jarak pointer dari atas thumb.
     Bar {
         list: bool,
@@ -1894,6 +1897,24 @@ fn open_url(u: &str) {
     let _ = cmd.arg(u).spawn();
 }
 
+/// Enter melanjutkan list; Enter di item kosong mengakhiri list.
+fn enter(doc: &mut Doc) {
+    let (a, b) = doc.selection();
+    if a == b {
+        let ls = doc.line_start(a);
+        if let Some((plen, next)) = md::continue_list(&doc.text[ls..a]) {
+            if a - ls == plen {
+                doc.set_selection(ls, a);
+                doc.insert("");
+            } else {
+                doc.insert(&format!("\n{next}"));
+            }
+            return;
+        }
+    }
+    doc.insert("\n");
+}
+
 /// Tombol edit yang sama untuk editor dan kotak cari.
 fn edit_common(doc: &mut Doc, ev: &KeyEvent, ctrl: bool, shift: bool, multiline: bool) -> bool {
     match &ev.logical_key {
@@ -1936,7 +1957,11 @@ fn edit_common(doc: &mut Doc, ev: &KeyEvent, ctrl: bool, shift: bool, multiline:
         _ if ctrl => return false,
         // `text` sudah memperhitungkan layout keyboard dan dead key.
         _ => match ev.text.as_deref() {
-            Some(t) if !t.chars().any(char::is_control) => doc.insert(t),
+            Some(t) if !t.chars().any(char::is_control) => {
+                if !(multiline && doc.wrap_typed(t)) {
+                    doc.insert(t)
+                }
+            }
             _ => return false,
         },
     }
@@ -3273,6 +3298,9 @@ impl App {
                     && clip_get().is_none_or(|t| t.is_empty())
                     && self.paste_image() => {}
                 "n" => self.new_note(""),
+                "l" if shift && self.focus == Focus::Editor && self.mode == Mode::Edit => {
+                    self.key_focused(&ev, ctrl, shift)
+                }
                 "f" | "l" => self.open_search(),
                 "\\" => self.click(Btn::Side),
                 "e" => self.toggle_mode(),
@@ -3381,9 +3409,9 @@ impl App {
                     }
                 } else if self.mode == Mode::Edit {
                     if enter {
-                        self.enter();
+                        self.doc.apply_all(self::enter);
                     } else {
-                        self.doc.backspace();
+                        self.doc.apply_all(Doc::backspace);
                     }
                     self.want_x = None;
                     self.changed();
@@ -3435,7 +3463,52 @@ impl App {
 
     fn key_editor(&mut self, ev: &KeyEvent, ctrl: bool, shift: bool) {
         let mut vertical = false;
+        let alt = self.mods.alt_key();
+        let multi = !self.doc.extra.is_empty();
+        let ch = match &ev.logical_key {
+            Key::Character(c) => c.to_lowercase(),
+            _ => String::new(),
+        };
         match &ev.logical_key {
+            // Multi-cursor ala Sublime: Ctrl+D, Ctrl+Shift+L, Shift+Alt+I, Ctrl+Alt+↑/↓.
+            Key::Named(k @ (NamedKey::ArrowUp | NamedKey::ArrowDown)) if alt && self.mods.control_key() => {
+                self.layout_views();
+                let (x, top, h) = self.ed.caret(self.doc.cursor);
+                let y = if *k == NamedKey::ArrowUp { top - 1.0 } else { top + h + 1.0 };
+                if y >= 0.0 && y < self.ed.h {
+                    let p = self.ed.pos_at(x, y);
+                    self.doc.add_caret(p);
+                }
+            }
+            Key::Character(_) if ctrl && ch == "d" => self.doc.select_next(),
+            Key::Character(_) if ctrl && shift && ch == "l" => self.doc.select_all_matches(),
+            Key::Character(_) if alt && shift && ch == "i" => self.doc.split_lines(),
+            Key::Character(_) if ctrl && ch == "b" => self.doc.apply_all(|d| d.toggle_wrap("**")),
+            Key::Character(_) if ctrl && ch == "i" => self.doc.apply_all(|d| d.toggle_wrap("*")),
+            Key::Character(_) if ctrl && ch == "k" => {
+                let url = clip_get().filter(|u| u.starts_with("http") && !u.contains(char::is_whitespace));
+                self.doc.apply_all(|d| d.link(url.as_deref()));
+            }
+            Key::Character(_) if ctrl && multi && (ch == "c" || ch == "x") => {
+                let t = self.doc.sels().iter().map(|&(a, b)| &self.doc.text[a..b]).collect::<Vec<_>>().join("\n");
+                clip_set(&t);
+                if ch == "x" {
+                    self.doc.apply_all(|d| d.insert(""));
+                }
+            }
+            // Jumlah baris clipboard = jumlah caret: tiap caret mendapat satu baris.
+            Key::Character(_) if ctrl && multi && ch == "v" => {
+                let Some(t) = clip_get() else { return };
+                let t = t.replace("\r\n", "\n");
+                let starts: Vec<usize> = self.doc.sels().iter().map(|s| s.0).collect();
+                let parts: Vec<&str> = t.split('\n').collect();
+                let each = parts.len() == starts.len();
+                self.doc.apply_all(|d| {
+                    // Caret diproses dari bawah: caret di atasnya belum bergeser.
+                    let i = starts.iter().filter(|&&s| s < d.selection().0).count();
+                    d.insert(if each { parts[i.min(parts.len() - 1)] } else { &t });
+                });
+            }
             Key::Named(
                 k @ (NamedKey::ArrowUp
                 | NamedKey::ArrowDown
@@ -3445,24 +3518,42 @@ impl App {
                 self.vertical(*k, shift);
                 vertical = true;
             }
-            Key::Named(NamedKey::Home) if ctrl => self.doc.set_cursor(0, shift),
-            Key::Named(NamedKey::End) if ctrl => self.doc.set_cursor(self.doc.text.len(), shift),
+            Key::Named(NamedKey::Home) if ctrl => {
+                self.doc.extra.clear();
+                self.doc.set_cursor(0, shift)
+            }
+            Key::Named(NamedKey::End) if ctrl => {
+                self.doc.extra.clear();
+                self.doc.set_cursor(self.doc.text.len(), shift)
+            }
             Key::Named(k @ (NamedKey::Home | NamedKey::End)) => {
                 self.layout_views();
-                let (_, top, h) = self.ed.caret(self.doc.cursor);
                 let x = if *k == NamedKey::Home {
                     0.0
                 } else {
                     f32::INFINITY
                 };
-                let p = self.ed.pos_at(x, top + h / 2.0);
-                self.doc.set_cursor(p, shift);
+                let ed = &self.ed;
+                self.doc.move_all(|d| {
+                    let (_, top, h) = ed.caret(d.cursor);
+                    d.set_cursor(ed.pos_at(x, top + h / 2.0), shift);
+                });
             }
-            Key::Named(NamedKey::Enter) => self.enter(),
-            Key::Named(NamedKey::Tab) => self.doc.insert("\t"),
-            Key::Named(NamedKey::Escape) => return,
+            Key::Named(NamedKey::Enter) => self.doc.apply_all(enter),
+            Key::Named(NamedKey::Tab) => self.doc.apply_all(|d| d.indent(shift)),
+            Key::Named(NamedKey::Escape) => {
+                self.doc.extra.clear();
+                return;
+            }
+            // Undo/redo/pilih semua sekali saja, bukan per caret.
+            _ if ctrl && matches!(ch.as_str(), "z" | "y" | "a") => {
+                self.doc.extra.clear();
+                edit_common(&mut self.doc, ev, ctrl, shift, true);
+            }
             _ => {
-                if !edit_common(&mut self.doc, ev, ctrl, shift, true) {
+                let mut ok = false;
+                self.doc.apply_all(|d| ok |= edit_common(d, ev, ctrl, shift, true));
+                if !ok {
                     return;
                 }
             }
@@ -3474,43 +3565,32 @@ impl App {
         self.reveal();
     }
 
-    /// Enter melanjutkan list; Enter di item kosong mengakhiri list.
-    fn enter(&mut self) {
-        let (a, b) = self.doc.selection();
-        if a == b {
-            let ls = self.doc.line_start(a);
-            if let Some((plen, next)) = md::continue_list(&self.doc.text[ls..a]) {
-                if a - ls == plen {
-                    self.doc.set_selection(ls, a);
-                    self.doc.insert("");
-                } else {
-                    self.doc.insert(&format!("\n{next}"));
-                }
-                return;
-            }
-        }
-        self.doc.insert("\n");
-    }
-
     fn vertical(&mut self, k: NamedKey, shift: bool) {
         self.layout_views();
-        let (x, top, h) = self.ed.caret(self.doc.cursor);
-        let x = *self.want_x.get_or_insert(x);
-        let page = self.view_h().max(h);
-        let y = match k {
-            NamedKey::ArrowUp => top - 1.0,
-            NamedKey::ArrowDown => top + h + 1.0,
-            NamedKey::PageUp => top - page,
-            _ => top + h + page,
-        };
-        let p = if y < 0.0 {
-            0
-        } else if y >= self.ed.h {
-            self.doc.text.len()
-        } else {
-            self.ed.pos_at(x, y)
-        };
-        self.doc.set_cursor(p, shift);
+        let main = self.doc.cursor;
+        let want = *self.want_x.get_or_insert(self.ed.caret(main).0);
+        let view = self.view_h();
+        let ed = &self.ed;
+        self.doc.move_all(|d| {
+            let (x, top, h) = ed.caret(d.cursor);
+            // Kolom yang diingat hanya untuk caret utama.
+            let x = if d.cursor == main { want } else { x };
+            let page = view.max(h);
+            let y = match k {
+                NamedKey::ArrowUp => top - 1.0,
+                NamedKey::ArrowDown => top + h + 1.0,
+                NamedKey::PageUp => top - page,
+                _ => top + h + page,
+            };
+            let p = if y < 0.0 {
+                0
+            } else if y >= ed.h {
+                d.text.len()
+            } else {
+                ed.pos_at(x, y)
+            };
+            d.set_cursor(p, shift);
+        });
     }
 
     fn key_read(&mut self, ev: &KeyEvent, ctrl: bool) {
@@ -3659,14 +3739,24 @@ impl App {
             match self.mode {
                 Mode::Edit => {
                     let p = self.ed.pos_at(rx, ry);
-                    match n {
-                        1 => self.doc.set_cursor(p, shift),
-                        2 => self.doc.select_word(p),
-                        _ => self.doc.select_line(p),
+                    if n == 1 && self.mods.alt_key() {
+                        self.doc.add_caret(p); // Alt+klik: caret tambahan
+                        self.drag = None;
+                    } else {
+                        self.doc.extra.clear();
+                        match n {
+                            1 => self.doc.set_cursor(p, shift),
+                            2 => self.doc.select_word(p),
+                            _ => self.doc.select_line(p),
+                        }
+                        let (a, b) = self.doc.selection();
+                        self.drag = match n {
+                            1 => Some(Drag::Editor),
+                            2 => Some(Drag::EditWord(a, b)),
+                            _ => None,
+                        };
                     }
                     self.want_x = None;
-                    // Klik ganda/tiga kali: geseran kecil mouse tidak boleh membuang pilihan kata.
-                    self.drag = (n == 1).then_some(Drag::Editor);
                 }
                 Mode::Read => {
                     if let Some((r, done)) = self.rd.check_at(rx, ry, 4.0 * self.s) {
@@ -3698,7 +3788,11 @@ impl App {
                             }
                             _ => ((k, 0), (k, usize::MAX)),
                         });
-                        self.drag = (n == 1).then_some(Drag::Read);
+                        self.drag = match self.rd.sel {
+                            Some(s) if n == 2 => Some(Drag::ReadWord(s.0, s.1)),
+                            _ if n == 1 => Some(Drag::Read),
+                            _ => None,
+                        };
                     }
                 }
             }
@@ -3732,6 +3826,26 @@ impl App {
                 let (ox, oy) = self.ed_origin(&geo);
                 let p = self.ed.pos_at(x - ox, y - oy);
                 self.doc.set_cursor(p, true);
+                self.redraw();
+            }
+            Some(Drag::EditWord(a0, b0)) => {
+                self.layout_views();
+                let (ox, oy) = self.ed_origin(&geo);
+                let (wa, wb) = self.doc.word_range(self.ed.pos_at(x - ox, y - oy));
+                if wa < a0 {
+                    self.doc.set_selection(b0, wa);
+                } else {
+                    self.doc.set_selection(a0, wb.max(b0));
+                }
+                self.redraw();
+            }
+            Some(Drag::ReadWord(a0, b0)) => {
+                self.layout_views();
+                let (ox, oy) = self.ed_origin(&geo);
+                if let Some((k, i)) = self.rd.pos_at(x - ox, y - oy) {
+                    let (wa, wb) = self.rd.word_at(k, i);
+                    self.rd.sel = Some(if (k, wa) < a0 { (b0, (k, wa)) } else { (a0, (k, wb).max(b0)) });
+                }
                 self.redraw();
             }
             Some(Drag::Search) => {
@@ -5000,7 +5114,7 @@ impl App {
         let (t, s, c) = (self.theme, self.s, geo.content);
         p.g.set_clip(Some(c));
         let (ox, oy) = self.ed_origin(geo);
-        let (a, b) = self.doc.selection();
+        let sels = self.doc.sels();
         let (top, bot) = (c.y, c.y + c.h);
         let first = self.ed.lines.partition_point(|l| oy + l.y + l.lay.h < top);
         let code = |l: &EdLine| matches!(l.kind, Kind::Code | Kind::Fence);
@@ -5025,7 +5139,7 @@ impl App {
             if y > bot {
                 break;
             }
-            if a < b && a <= l.end && b > l.start {
+            for &(a, b) in sels.iter().filter(|&&(a, b)| a < b && a <= l.end && b > l.start) {
                 let n = l.lay.rows.len();
                 for (k, r) in l.lay.rows.iter().enumerate() {
                     let lo = a.saturating_sub(l.start).max(r.start);
@@ -5072,6 +5186,12 @@ impl App {
             );
         }
         if self.focus == Focus::Editor {
+            for &(_, c) in &self.doc.extra {
+                let (cx, cy, ch) = self.ed.caret(c);
+                let inset = ch * (1.0 - 1.0 / LH) / 2.0;
+                let w = (2.0 * s).round().max(1.0);
+                p.rect(Rect::new((ox + cx).round(), (oy + cy + inset).round(), w, (ch - 2.0 * inset).round()), t.accent);
+            }
             let (cx, cy, ch) = self.ed.caret(self.doc.cursor);
             let inset = ch * (1.0 - 1.0 / LH) / 2.0;
             let cr = Rect::new(

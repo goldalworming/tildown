@@ -140,7 +140,17 @@ Notes on security:
 | Ctrl+S | Save now |
 | Ctrl+\ | Toggle sidebar |
 | F3 / Shift+F3 | Next / previous search match |
-| Esc | Close search, dialog or viewer |
+| Esc | Close search, dialog or viewer; drop extra cursors |
+| Ctrl+B / Ctrl+I / Ctrl+K | Bold / italic / link (a URL on the clipboard fills the link) |
+| Tab / Shift+Tab | Indent / outdent the selected lines |
+| `(` `[` `"` `*` `_` … with a selection | Wrap the selection |
+| Double-click, then drag | Select by whole words |
+| Ctrl+D | Select the word, then add its next occurrence (multi-cursor) |
+| Ctrl+Shift+L | A cursor on every occurrence |
+| Alt+click / Ctrl+Alt+↑↓ | Add a cursor |
+| Shift+Alt+I | A cursor at the end of each selected line |
+
+With several cursors, typing, deleting, arrows, Home/End and Enter act at every cursor, and Ctrl+Z undoes them in one step. Copy joins the selections line by line; pasting as many lines as there are cursors puts one line at each.
 
 ## Build
 
