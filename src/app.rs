@@ -2067,6 +2067,8 @@ pub struct App {
     /// Kedalaman lapisan yang terakhir dilaporkan ke riwayat browser (web).
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     nav: u32,
+    /// Dua catatan yang terakhir ditulis (terbaru dulu): tujuan Snip (Ctrl+Shift+C).
+    snip_to: Vec<String>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2216,6 +2218,7 @@ impl App {
             nav: 0,
             glide: None,
             menu: None,
+            snip_to: Vec::new(),
             touch_sel: false,
             notice: String::new(),
             focused: true,
@@ -2422,6 +2425,11 @@ impl App {
             let now = Instant::now();
             let since = *self.dirty_since.get_or_insert(now);
             self.save_due = Some((now + SAVE_DELAY).min(since + SAVE_MAX));
+            let id = &self.store.notes[self.cur].id;
+            if self.snip_to.first() != Some(id) {
+                self.snip_to.insert(0, id.clone());
+                self.snip_to.truncate(2);
+            }
         }
         self.set_title();
     }
@@ -3298,6 +3306,7 @@ impl App {
                     && clip_get().is_none_or(|t| t.is_empty())
                     && self.paste_image() => {}
                 "n" => self.new_note(""),
+                "c" if shift && self.focus != Focus::Search && self.has_selection() => self.snip(),
                 "l" if shift && self.focus == Focus::Editor && self.mode == Mode::Edit => {
                     self.key_focused(&ev, ctrl, shift)
                 }
@@ -4231,6 +4240,9 @@ impl App {
             v.push((2, "Paste", "Ctrl+V"));
         }
         v.push((3, "Select all", "Ctrl+A"));
+        if sel {
+            v.push((5, "Snip to note", "Ctrl+Shift+C"));
+        }
         if self.sync.on() {
             v.push((4, "Copy note reference", "")); // untuk Claude: "baca tildown:…"
         }
@@ -4281,6 +4293,7 @@ impl App {
                 clip_set(&format!("tildown:{id} ({})", store::title_of(&self.doc.text)));
                 self.notice = "Note reference copied. Paste it in Claude.".into();
             }
+            (5, _) => self.snip(),
             (3, Mode::Edit) => self.doc.select_all(),
             (3, Mode::Read) => {
                 let n = self.rd.items.len();
@@ -4319,6 +4332,41 @@ impl App {
     }
 
     /// Ada teks terpilih di editor / mode baca.
+    /// Tambahkan teks terpilih sebagai kutipan (+ judul sumber) ke akhir catatan
+    /// yang terakhir ditulis selain catatan ini; belum ada → "Snippets <tanggal>".
+    fn snip(&mut self) {
+        let t = match self.mode {
+            Mode::Edit => self.doc.selected_text().to_owned(),
+            Mode::Read => self.rd.selected_text(),
+        };
+        if t.trim().is_empty() {
+            return;
+        }
+        let src = &self.store.notes[self.cur].id;
+        let d = store::stamp(SystemTime::now());
+        let day = format!("Snippets {}-{}-{}", &d[..4], &d[4..6], &d[6..8]);
+        let to = self.snip_to.iter().find(|id| *id != src).cloned();
+        let i = match self.store.notes.iter().position(|n| Some(&n.id) == to.as_ref() || to.is_none() && n.title() == day) {
+            Some(i) => i,
+            None => self.store.create(&format!("# {day}\n")),
+        };
+        if to.is_none() {
+            self.snip_to.push(self.store.notes[i].id.clone());
+        }
+        let q: Vec<String> = t.trim().lines().map(|l| format!("> {l}").trim_end().to_owned()).collect();
+        let n = &self.store.notes[i];
+        let text = format!("{}\n\n{}\n— {}\n", n.text.trim_end(), q.join("\n"), store::title_of(&self.doc.text));
+        self.store.set_text(i, &text);
+        match self.store.save(i) {
+            Ok(()) => {
+                self.notice = format!("Snipped to \u{201c}{}\u{201d}", self.store.notes[i].title());
+                self.sync_soon();
+                self.refilter();
+            }
+            Err(e) => self.status = format!("Couldn't save: {e}"),
+        }
+    }
+
     fn has_selection(&self) -> bool {
         match self.mode {
             Mode::Edit => self.doc.selection().0 != self.doc.selection().1,
