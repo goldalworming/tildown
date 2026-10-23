@@ -3665,7 +3665,8 @@ impl App {
                         _ => self.doc.select_line(p),
                     }
                     self.want_x = None;
-                    self.drag = Some(Drag::Editor);
+                    // Klik ganda/tiga kali: geseran kecil mouse tidak boleh membuang pilihan kata.
+                    self.drag = (n == 1).then_some(Drag::Editor);
                 }
                 Mode::Read => {
                     if let Some((r, done)) = self.rd.check_at(rx, ry, 4.0 * self.s) {
@@ -3688,8 +3689,16 @@ impl App {
                             .position(|d| d.0.contains(rx, ry))
                             .map(|i| (i, (x, y)));
                         let anchor = self.rd.sel.filter(|_| shift).map_or(p, |s| s.0);
-                        self.rd.sel = Some((anchor, p));
-                        self.drag = Some(Drag::Read);
+                        let (k, i) = p;
+                        self.rd.sel = Some(match n {
+                            1 => (anchor, p),
+                            2 => {
+                                let (a, b) = self.rd.word_at(k, i);
+                                ((k, a), (k, b))
+                            }
+                            _ => ((k, 0), (k, usize::MAX)),
+                        });
+                        self.drag = (n == 1).then_some(Drag::Read);
                     }
                 }
             }
@@ -5519,7 +5528,10 @@ mod tests {
         assert!(newer("v99.0.0"));
         assert!(!newer(concat!("v", env!("CARGO_PKG_VERSION"))));
         assert!(!newer("v0.0.9"));
-        assert!(newer(&format!("v{}.10", env!("CARGO_PKG_VERSION").rsplit_once('.').unwrap().0))); // .10 > .2, bukan urut huruf
+        let (minor, patch) = env!("CARGO_PKG_VERSION").rsplit_once('.').unwrap();
+        let patch: u32 = patch.parse().unwrap();
+        assert!(newer(&format!("v{minor}.{}", patch * 10 + 10))); // dibandingkan per angka, bukan urut huruf
+        assert!(!newer(&format!("v{minor}.{}", patch.saturating_sub(1))));
     }
 
     #[test]
