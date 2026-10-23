@@ -143,6 +143,7 @@ Notes on security:
 | Esc | Close search, dialog or viewer; drop extra cursors |
 | Ctrl+B / Ctrl+I / Ctrl+K | Bold / italic / link (a URL on the clipboard fills the link) |
 | Tab / Shift+Tab | Indent / outdent the selected lines |
+| Ctrl+Shift+D | Duplicate the line (or the selection) |
 | `(` `[` `"` `*` `_` … with a selection | Wrap the selection |
 | Double-click, then drag | Select by whole words |
 | Ctrl+D | Select the word, then add its next occurrence (multi-cursor) |

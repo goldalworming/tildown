@@ -441,6 +441,22 @@ impl Doc {
         }
     }
 
+    /// Ctrl+Shift+D: gandakan baris cursor ke bawahnya (cursor ikut ke salinan),
+    /// atau gandakan teks terpilih tepat setelahnya.
+    pub fn duplicate(&mut self) {
+        let (a, b) = self.selection();
+        if a == b {
+            let (ls, le) = (self.line_start(a), self.line_end(a));
+            let line = self.text[ls..le].to_owned();
+            self.replace_range(le, le, &format!("\n{line}"));
+            self.set_cursor(a + line.len() + 1, false);
+        } else {
+            let s = self.text[a..b].to_owned();
+            self.replace_range(b, b, &s);
+            self.set_selection(b, b + s.len());
+        }
+    }
+
     /// Ctrl+B / Ctrl+I: bungkus seleksi dengan penanda `m`, atau lepas bila
     /// sudah terbungkus. Tanpa seleksi cursor diletakkan di antara penanda.
     pub fn toggle_wrap(&mut self, m: &str) {
@@ -763,6 +779,14 @@ mod tests {
         d.set_cursor(8, false);
         d.indent(false); // tanpa seleksi: sisipkan tab
         assert_eq!(d.text, "- a\n- b\n\tc");
+
+        let mut d = Doc::new("a\nbc\nd");
+        d.set_cursor(3, false);
+        d.duplicate();
+        assert_eq!((d.text.as_str(), d.cursor), ("a\nbc\nbc\nd", 6));
+        d.set_selection(0, 1);
+        d.duplicate();
+        assert_eq!((d.text.as_str(), d.selected_text()), ("aa\nbc\nbc\nd", "a"));
 
         let mut d = Doc::new("halo dunia");
         d.set_selection(5, 10);

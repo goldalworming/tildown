@@ -3480,6 +3480,7 @@ impl App {
                     self.doc.add_caret(p);
                 }
             }
+            Key::Character(_) if ctrl && shift && ch == "d" => self.doc.apply_all(Doc::duplicate),
             Key::Character(_) if ctrl && ch == "d" => self.doc.select_next(),
             Key::Character(_) if ctrl && shift && ch == "l" => self.doc.select_all_matches(),
             Key::Character(_) if alt && shift && ch == "i" => self.doc.split_lines(),
