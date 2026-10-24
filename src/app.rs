@@ -4306,6 +4306,9 @@ impl App {
         }
         if sel {
             v.push((1, "Copy", "Ctrl+C"));
+            if self.pane.is_some() {
+                v.push((7, "Copy to snippet", ""));
+            }
         }
         if self.mode == Mode::Edit {
             v.push((2, "Paste", "Ctrl+V"));
@@ -4368,6 +4371,13 @@ impl App {
                 let id = &self.store.notes[self.cur].id;
                 clip_set(&format!("tildown:{id} ({})", store::title_of(&self.doc.text)));
                 self.notice = "Note reference copied. Paste it in Claude.".into();
+            }
+            (7, _) => {
+                let t = match self.mode {
+                    Mode::Edit => self.doc.selected_text().to_owned(),
+                    Mode::Read => self.rd.selected_text(),
+                };
+                self.copy_to_pane(&t);
             }
             (6, _) => {
                 let Some(i) = self.menu_note.take() else { return };
@@ -5488,6 +5498,20 @@ impl App {
             words: (u64::MAX, 0),
         });
         self.refilter();
+    }
+
+    /// "Copy to snippet": tempel `t` di kursor panel lain, baris sendiri.
+    fn copy_to_pane(&mut self, t: &str) {
+        self.save_now();
+        if t.trim().is_empty() || !self.swap_pane() {
+            return;
+        }
+        let a = self.doc.selection().0;
+        let nl = if a == 0 || self.doc.text[..a].ends_with('\n') { "" } else { "\n" };
+        self.doc.insert(&format!("{nl}{}\n\n", t.trim()));
+        self.save_now();
+        self.reveal();
+        self.swap_pane();
     }
 
     /// Tutup split; catatan baru di panel lain yang tidak diisi dibuang.
