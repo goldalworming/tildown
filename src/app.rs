@@ -4113,6 +4113,20 @@ impl App {
                 let now = Instant::now();
                 let mut tp = Tap { id, start: pos, last: pos, moved: false, t0: now, held: false, v: 0.0, tl: now, dy: 0.0, boost };
                 let r = 28.0 * self.s;
+                // Thumb scrollbar dipegang jari (area sentuh lebih lebar dari gambarnya).
+                let geo = self.geo();
+                self.layout_views();
+                for list in [false, true] {
+                    let Some(b) = self.bar(&geo, list) else { continue };
+                    let t = b.thumb;
+                    if (t.x - r..t.x + t.w).contains(&pos.0) && (t.y - r / 2.0..t.y + t.h + r / 2.0).contains(&pos.1) {
+                        let grab = (pos.1 - t.y).clamp(0.0, t.h);
+                        self.drag = Some(Drag::Bar { list, grab });
+                        (tp.held, tp.moved) = (true, true);
+                        self.tap = Some(tp);
+                        return self.redraw();
+                    }
+                }
                 if let Some(hs) = self.sel_handles() {
                     if let Some(j) = (0..2).find(|&j| (pos.0 - hs[j].0).hypot(pos.1 - hs[j].1 - r / 3.0) < r) {
                         self.grab_handle(j);
@@ -4161,8 +4175,9 @@ impl App {
                     }
                 }
                 if tp.as_ref().is_some_and(|tp| tp.held) {
+                    let bar = matches!(self.drag, Some(Drag::Bar { .. }));
                     self.release();
-                    if self.has_selection() {
+                    if self.has_selection() && !bar {
                         self.menu_note = None;
                         self.menu = Some((pos.0, pos.1, true)); // menu di dekat jari terakhir
                     }
