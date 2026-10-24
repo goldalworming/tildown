@@ -2078,8 +2078,6 @@ pub struct App {
     pane: Option<Pane>,
     /// Catatan aktif ada di panel kanan.
     right: bool,
-    /// Catatan snippet: selalu dibuka di panel kanan saat split dibuka.
-    snip_id: Option<String>,
     /// Menu konteks dibuka dari baris daftar ini (indeks `store.notes`).
     menu_note: Option<usize>,
 }
@@ -2248,7 +2246,6 @@ impl App {
             copied: None,
             pane: None,
             right: false,
-            snip_id: get("snip").filter(|s| !s.is_empty()).map(str::to_owned),
             menu_note: None,
             touch_sel: false,
             notice: String::new(),
@@ -2439,7 +2436,6 @@ impl App {
             ("width", &self.col.to_string()),
             ("open", m(self.open_in)),
             ("side", if self.side_open { "1" } else { "0" }),
-            ("snip", self.snip_id.as_deref().unwrap_or("")),
         ]);
     }
 
@@ -2999,10 +2995,10 @@ impl App {
             Btn::Mode => self.toggle_mode(),
             Btn::Delete => self.delete_note(),
             Btn::Split => {
-                if self.pane.take().is_some() {
-                    self.right = false;
+                if self.pane.is_some() {
+                    self.close_split();
                 } else {
-                    self.open_split();
+                    self.open_split(None);
                 }
             }
             Btn::Menu(i) => self.menu_do(i),
@@ -4375,13 +4371,9 @@ impl App {
             }
             (6, _) => {
                 let Some(i) = self.menu_note.take() else { return };
-                self.snip_id = Some(self.store.notes[i].id.clone());
-                self.save_state();
-                if self.pane.take().is_some() {
-                    self.right = false;
-                    self.open_split();
-                }
-                self.notice = format!("Snippet note: \u{201c}{}\u{201d}", self.store.notes.iter().find(|n| Some(&n.id) == self.snip_id.as_ref()).map_or("", |n| n.title()));
+                let id = self.store.notes[i].id.clone();
+                self.close_split();
+                self.open_split(Some(id));
             }
             (5, _) => {
                 #[cfg(target_arch = "wasm32")]
@@ -5467,20 +5459,16 @@ impl App {
         p.rect(Rect::new(x, geo.pane.y, p.lw(), geo.pane.h), self.theme.border);
     }
 
-    /// Buka split: catatan snippet di kanan (dibuat bila belum ada). Bila itu
-    /// catatan yang sedang terbuka, kiri pindah ke catatan lain.
-    fn open_split(&mut self) {
+    /// Buka split: catatan `id` di kanan, atau catatan baru yang kosong. Bila
+    /// `id` sedang terbuka, kiri pindah ke catatan lain.
+    fn open_split(&mut self, id: Option<String>) {
         self.save_now();
-        let find = |a: &App| a.snip_id.as_ref().and_then(|id| a.store.notes.iter().position(|n| &n.id == id));
-        if find(self).is_none() {
-            let i = self.store.create("# Snippets\n");
-            if let Err(e) = self.store.save(i) {
-                self.status = format!("Couldn't save: {e}");
-            }
-            self.snip_id = Some(self.store.notes[i].id.clone());
-            self.save_state();
-            self.refilter();
-        }
+        let mode = if id.is_some() { self.open_in } else { Mode::Edit };
+        let id = id.unwrap_or_else(|| {
+            let i = self.store.create("");
+            self.store.notes[i].id.clone()
+        });
+        let find = |a: &App| a.store.notes.iter().position(|n| n.id == id);
         if find(self) == Some(self.cur) {
             let other = self.res.iter().copied().find(|&i| i != self.cur);
             let other = other.unwrap_or_else(|| self.store.create(""));
@@ -5492,13 +5480,29 @@ impl App {
             id: self.store.notes[i].id.clone(),
             saved_ver: doc.version,
             doc,
-            mode: self.open_in,
+            mode,
             scroll: [0.0; 2],
             ed: EdView::default(),
             rd: RdView::default(),
             want_x: None,
             words: (u64::MAX, 0),
         });
+        self.refilter();
+    }
+
+    /// Tutup split; catatan baru di panel lain yang tidak diisi dibuang.
+    fn close_split(&mut self) {
+        self.save_now();
+        self.right = false;
+        let Some(pn) = self.pane.take() else { return };
+        let i = self.store.notes.iter().position(|n| n.id == pn.id && !n.on_disk && n.text.trim().is_empty());
+        if let Some(i) = i.filter(|&i| i != self.cur && pn.doc.text.trim().is_empty()) {
+            self.store.notes.remove(i);
+            if i < self.cur {
+                self.cur -= 1;
+            }
+            self.refilter();
+        }
     }
 
     /// Tukar status catatan aktif dengan panel lain; posisi di layar tetap.
