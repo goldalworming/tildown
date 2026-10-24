@@ -2078,6 +2078,10 @@ pub struct App {
     pane: Option<Pane>,
     /// Catatan aktif ada di panel kanan.
     right: bool,
+    /// Catatan snippet: selalu dibuka di panel kanan saat split dibuka.
+    snip_id: Option<String>,
+    /// Menu konteks dibuka dari baris daftar ini (indeks `store.notes`).
+    menu_note: Option<usize>,
 }
 
 /// Status catatan di panel yang tidak aktif; ditukar dengan milik `App`
@@ -2244,6 +2248,8 @@ impl App {
             copied: None,
             pane: None,
             right: false,
+            snip_id: get("snip").filter(|s| !s.is_empty()).map(str::to_owned),
+            menu_note: None,
             touch_sel: false,
             notice: String::new(),
             focused: true,
@@ -2433,6 +2439,7 @@ impl App {
             ("width", &self.col.to_string()),
             ("open", m(self.open_in)),
             ("side", if self.side_open { "1" } else { "0" }),
+            ("snip", self.snip_id.as_deref().unwrap_or("")),
         ]);
     }
 
@@ -2992,25 +2999,10 @@ impl App {
             Btn::Mode => self.toggle_mode(),
             Btn::Delete => self.delete_note(),
             Btn::Split => {
-                self.right = false;
-                self.pane = match self.pane {
-                    Some(_) => None,
-                    None => {
-                        let other = self.res.iter().copied().find(|&i| i != self.cur);
-                        let i = other.unwrap_or_else(|| self.store.create(""));
-                        let doc = Doc::new(&self.store.notes[i].text);
-                        Some(Pane {
-                            id: self.store.notes[i].id.clone(),
-                            saved_ver: doc.version,
-                            doc,
-                            mode: self.open_in,
-                            scroll: [f32::MAX; 2],
-                            ed: EdView::default(),
-                            rd: RdView::default(),
-                            want_x: None,
-                            words: (u64::MAX, 0),
-                        })
-                    }
+                if self.pane.take().is_some() {
+                    self.right = false;
+                } else {
+                    self.open_split();
                 }
             }
             Btn::Menu(i) => self.menu_do(i),
@@ -4154,6 +4146,7 @@ impl App {
                 if tp.as_ref().is_some_and(|tp| tp.held) {
                     self.release();
                     if self.has_selection() {
+                        self.menu_note = None;
                         self.menu = Some((pos.0, pos.1, true)); // menu di dekat jari terakhir
                     }
                 } else if !tp.is_some_and(|tp| tp.moved) {
@@ -4196,6 +4189,7 @@ impl App {
                 }
             }
         }
+        self.menu_note = None;
         self.menu = Some((x, y, true));
         self.redraw();
     }
@@ -4273,6 +4267,16 @@ impl App {
     /// seleksi), lalu buka menu konteks.
     fn right_click(&mut self) {
         let (x, y) = self.mouse;
+        self.menu_note = None;
+        let geo = self.geo();
+        if self.side_open && self.settings.is_none() && geo.list.contains(x, y) {
+            self.menu_note = self.row_at(x, y).and_then(|k| self.res.get(k).copied());
+            if self.menu_note.is_some() {
+                self.menu = Some((x, y, false));
+                self.redraw();
+            }
+            return;
+        }
         self.focus_pane_at(x, y);
         let geo = self.geo();
         if self.settings.is_some() || self.zoom.is_some() || !geo.content.contains(x, y) {
@@ -4296,6 +4300,9 @@ impl App {
 
     /// Isi menu konteks: (aksi, label, pintasan).
     fn menu_items(&self) -> Vec<(u8, &'static str, &'static str)> {
+        if self.menu_note.is_some() {
+            return vec![(6, "Set as snippet note", "")];
+        }
         let sel = self.has_selection();
         let mut v = Vec::new();
         if self.mode == Mode::Edit && sel {
@@ -4365,6 +4372,16 @@ impl App {
                 let id = &self.store.notes[self.cur].id;
                 clip_set(&format!("tildown:{id} ({})", store::title_of(&self.doc.text)));
                 self.notice = "Note reference copied. Paste it in Claude.".into();
+            }
+            (6, _) => {
+                let Some(i) = self.menu_note.take() else { return };
+                self.snip_id = Some(self.store.notes[i].id.clone());
+                self.save_state();
+                if self.pane.take().is_some() {
+                    self.right = false;
+                    self.open_split();
+                }
+                self.notice = format!("Snippet note: \u{201c}{}\u{201d}", self.store.notes.iter().find(|n| Some(&n.id) == self.snip_id.as_ref()).map_or("", |n| n.title()));
             }
             (5, _) => {
                 #[cfg(target_arch = "wasm32")]
@@ -5448,6 +5465,40 @@ impl App {
         p.g.set_clip(None);
         let x = geo.content.x.max(geo.pane.x);
         p.rect(Rect::new(x, geo.pane.y, p.lw(), geo.pane.h), self.theme.border);
+    }
+
+    /// Buka split: catatan snippet di kanan (dibuat bila belum ada). Bila itu
+    /// catatan yang sedang terbuka, kiri pindah ke catatan lain.
+    fn open_split(&mut self) {
+        self.save_now();
+        let find = |a: &App| a.snip_id.as_ref().and_then(|id| a.store.notes.iter().position(|n| &n.id == id));
+        if find(self).is_none() {
+            let i = self.store.create("# Snippets\n");
+            if let Err(e) = self.store.save(i) {
+                self.status = format!("Couldn't save: {e}");
+            }
+            self.snip_id = Some(self.store.notes[i].id.clone());
+            self.save_state();
+            self.refilter();
+        }
+        if find(self) == Some(self.cur) {
+            let other = self.res.iter().copied().find(|&i| i != self.cur);
+            let other = other.unwrap_or_else(|| self.store.create(""));
+            self.open_note(other);
+        }
+        let Some(i) = find(self) else { return };
+        let doc = Doc::new(&self.store.notes[i].text);
+        self.pane = Some(Pane {
+            id: self.store.notes[i].id.clone(),
+            saved_ver: doc.version,
+            doc,
+            mode: self.open_in,
+            scroll: [0.0; 2],
+            ed: EdView::default(),
+            rd: RdView::default(),
+            want_x: None,
+            words: (u64::MAX, 0),
+        });
     }
 
     /// Tukar status catatan aktif dengan panel lain; posisi di layar tetap.

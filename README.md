@@ -145,6 +145,7 @@ Notes on security:
 | Tab / Shift+Tab | Indent / outdent the selected lines |
 | Ctrl+Shift+D | Duplicate the line (or the selection) |
 | Ctrl+Shift+V | Paste as a quote; text copied from another note gets that note's title |
+| Split button (toolbar) | Open your snippet note on the right, next to the current note; right-click a note in the list → *Set as snippet note* to pick another |
 | `(` `[` `"` `*` `_` … with a selection | Wrap the selection |
 | Double-click, then drag | Select by whole words |
 | Ctrl+D | Select the word, then add its next occurrence (multi-cursor) |
