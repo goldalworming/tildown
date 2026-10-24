@@ -91,6 +91,9 @@ struct Tap {
     tl: Instant,
     /// Menarik pegangan seleksi: jarak jari di bawah titik yang dipindah.
     dy: f32,
+    /// Kecepatan lemparan yang masih jalan saat jari menyentuh: lempar lagi
+    /// searah = makin cepat, seperti di browser.
+    boost: f32,
 }
 
 /// Gulir beranimasi: sisa jarak roda mouse (dihabiskan halus) dan kecepatan
@@ -4105,9 +4108,10 @@ impl App {
     fn touch_ui(&mut self, id: u64, phase: TouchPhase, pos: (f32, f32)) {
         match phase {
             TouchPhase::Started if self.tap.is_none() => {
-                self.glide = None; // jari menahan lemparan yang sedang jalan
+                // Jari menahan lemparan yang sedang jalan.
+                let boost = self.glide.take().map_or(0.0, |g| g.v);
                 let now = Instant::now();
-                let mut tp = Tap { id, start: pos, last: pos, moved: false, t0: now, held: false, v: 0.0, tl: now, dy: 0.0 };
+                let mut tp = Tap { id, start: pos, last: pos, moved: false, t0: now, held: false, v: 0.0, tl: now, dy: 0.0, boost };
                 let r = 28.0 * self.s;
                 if let Some(hs) = self.sel_handles() {
                     if let Some(j) = (0..2).find(|&j| (pos.0 - hs[j].0).hypot(pos.1 - hs[j].1 - r / 3.0) < r) {
@@ -4150,8 +4154,10 @@ impl App {
                 let tp = self.tap.take();
                 // Lepas sambil bergerak: isi terus meluncur.
                 if let Some(t) = tp.as_ref().filter(|t| t.moved && !t.held && t.tl.elapsed() < Duration::from_millis(80)) {
-                    if let (Some(list), true) = (self.scroll_area(t.start.0, t.start.1), t.v.abs() > 100.0) {
-                        self.glide = Some(Glide { list, rest: 0.0, v: t.v.clamp(-8000.0, 8000.0), t: Instant::now() });
+                    if let (Some(list), true) = (self.scroll_area(t.start.0, t.start.1), t.v.abs() > 100.0 * self.s) {
+                        let v = t.v + if t.boost * t.v > 0.0 { t.boost } else { 0.0 };
+                        let m = 20000.0 * self.s;
+                        self.glide = Some(Glide { list, rest: 0.0, v: v.clamp(-m, m), t: Instant::now() });
                     }
                 }
                 if tp.as_ref().is_some_and(|tp| tp.held) {
@@ -4691,10 +4697,10 @@ impl App {
         // Roda: habiskan sisa jarak dengan ease-out ~80 ms.
         let mut d = if g.rest.abs() < 0.5 { g.rest } else { g.rest * (1.0 - (-dt / 0.08).exp()) };
         g.rest -= d;
-        // Lemparan: melambat eksponensial (τ 0,35 detik), seperti gulir HP.
+        // Lemparan: melambat eksponensial (τ 0,5 detik, seperti iOS).
         d += g.v * dt;
-        g.v *= (-dt / 0.35).exp();
-        if g.v.abs() < 15.0 {
+        g.v *= (-dt / 0.5).exp();
+        if g.v.abs() < 15.0 * self.s {
             g.v = 0.0;
         }
         let (list, done) = (g.list, g.rest == 0.0 && g.v == 0.0);
