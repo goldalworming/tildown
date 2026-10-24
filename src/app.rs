@@ -243,6 +243,8 @@ enum Btn {
     Menu(u8),
     /// Toolbar: buka/tutup panel kanan.
     Split,
+    /// Split: ikon mode di pojok panel (0 = aktif, 1 = yang lain).
+    PaneMode(u8),
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2844,6 +2846,11 @@ impl App {
             return v; // isi tertutup daftar: tanpa toolbar
         }
         v.push((r(geo.bar.x + 8.0 * s, 8.0 * s, 32.0, 32.0), Btn::Side));
+        if self.pane.is_some() && geo.pane.w > 0.0 {
+            for (k, c) in [geo.content, geo.pane].into_iter().enumerate() {
+                v.push((r(c.x + c.w - 44.0 * s, c.y + 8.0 * s, 32.0, 32.0), Btn::PaneMode(k as u8)));
+            }
+        }
         if !self.query().is_empty() {
             let y = geo.content.y + geo.content.h + 4.0 * s;
             v.push((r(w - 84.0 * s, y, 32.0, 32.0), Btn::MatchPrev));
@@ -2994,6 +3001,14 @@ impl App {
             Btn::Settings => self.open_settings(0),
             Btn::Mode => self.toggle_mode(),
             Btn::Delete => self.delete_note(),
+            Btn::PaneMode(k) => {
+                if k == 1 {
+                    self.save_now();
+                    self.swap_pane();
+                    self.set_title();
+                }
+                self.toggle_mode();
+            }
             Btn::Split => {
                 if self.pane.is_some() {
                     self.close_split();
@@ -4761,6 +4776,18 @@ impl App {
         }
         self.paint_pane(p, &geo);
         p.g.set_clip(None);
+        // Split: garis aksen di atas panel aktif, ikon mode di pojok tiap panel.
+        if let Some(pn) = self.pane.as_ref().filter(|_| geo.pane.w > 0.0) {
+            let c = geo.content;
+            p.rect(Rect::new(c.x, c.y, c.w, (2.0 * s).round()), t.accent);
+            for &(r, b) in &hits {
+                let Btn::PaneMode(k) = b else { continue };
+                let m = if k == 0 { self.mode } else { pn.mode };
+                self.hover_bg(p, r, b);
+                let icon = if m == Mode::Read { "book-open" } else { "pencil" };
+                p.icon_in(icon, r, 16.0 * s, if k == 0 { t.fg } else { t.dim });
+            }
+        }
         self.paint_bar(p, &geo, &hits);
         if !self.query().is_empty() {
             self.paint_matches(p, &geo, &hits);
